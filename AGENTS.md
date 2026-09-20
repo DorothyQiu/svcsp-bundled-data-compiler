@@ -1,6 +1,7 @@
 # Project Goal
 
-Build an automated compiler from SystemVerilog CSP (SVCSP) behavioral descriptions to synthesizable structural bundled-data asynchronous RTL.
+Build an automated compiler from SystemVerilog CSP (SVCSP) behavioral
+descriptions to synthesizable structural bundled-data asynchronous RTL.
 
 This is not merely a SystemVerilog syntax translator.
 
@@ -31,7 +32,8 @@ SVCSP
 
 # Conditional Communication
 
-Use a Proteus-inspired normalization strategy.
+Conditional communication is normalized using enable signals plus dedicated
+SEND/RECV wrapper representations.
 
 Conditional Receive:
 - enable=1: consume the external token and forward real data internally.
@@ -42,7 +44,11 @@ Conditional Send:
 - enable=1: communicate externally.
 - enable=0: suppress external communication.
 
-The BODY should eventually be suitable for unconditional bundled-data pipeline stages.
+The BODY should eventually be suitable for unconditional bundled-data
+pipeline stages.
+
+Detailed semantics are in:
+docs/communication_normalization.md
 
 # Repository Layout
 
