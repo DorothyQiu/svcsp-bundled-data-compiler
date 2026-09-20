@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "stage": "four-phase-handshake-ir",
+  "ir": {
+    "name": "async_adder",
+    "parameters": {
+      "WIDTH": 8
+    },
+    "variables": {
+      "a": {
+        "width": 8,
+        "initial": 0
+      },
+      "b": {
+        "width": 8,
+        "initial": 0
+      },
+      "sum": {
+        "width": 9,
+        "initial": 0
+      }
+    },
+    "channels": {
+      "A": {
+        "direction": "input",
+        "width": 8
+      },
+      "B": {
+        "direction": "input",
+        "width": 8
+      },
+      "SUM": {
+        "direction": "output",
+        "width": 9
+      }
+    },
+    "body": {
+      "kind": "sequence",
+      "body": [
+        {
+          "kind": "parallel",
+          "body": [
+            {
+              "kind": "receive",
+              "channel": "A",
+              "target": "a",
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 15,
+                "column": 13
+              }
+            },
+            {
+              "kind": "receive",
+              "channel": "B",
+              "target": "b",
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 16,
+                "column": 13
+              }
+            }
+          ],
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 14,
+            "column": 9
+          }
+        },
+        {
+          "kind": "assign",
+          "target": "sum",
+          "expr": {
+            "text": "({1'b0, a} + {1'b0, b})",
+            "width": 9,
+            "reads": [
+              "a",
+              "b"
+            ]
+          },
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 18,
+            "column": 9
+          }
+        },
+        {
+          "kind": "send",
+          "channel": "SUM",
+          "expr": {
+            "text": "sum",
+            "width": 9,
+            "reads": [
+              "sum"
+            ]
+          },
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 19,
+            "column": 9
+          }
+        }
+      ],
+      "location": {
+        "file": "examples/async_adder.sv",
+        "line": 13,
+        "column": 12
+      }
+    }
+  }
+}

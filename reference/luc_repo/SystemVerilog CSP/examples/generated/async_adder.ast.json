@@ -1,0 +1,644 @@
+{
+  "schema_version": 1,
+  "stage": "unelaborated-source-ast",
+  "ast": {
+    "kind": "CompilationUnit",
+    "members": [
+      {
+        "kind": "Module",
+        "name": "async_adder",
+        "parameters": {
+          "kind": "ParameterPortList",
+          "hash": "#",
+          "declarations": [
+            {
+              "kind": "ParameterDeclaration",
+              "keyword": "parameter",
+              "type": {
+                "kind": "IntType",
+                "keyword": "int",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 4,
+                  "column": 15
+                }
+              },
+              "declarators": [
+                {
+                  "kind": "Declarator",
+                  "name": "WIDTH",
+                  "initializer": {
+                    "kind": "IntegerLiteralExpression",
+                    "literal": "8",
+                    "location": {
+                      "file": "examples/async_adder.sv",
+                      "line": 4,
+                      "column": 27
+                    }
+                  },
+                  "location": {
+                    "file": "examples/async_adder.sv",
+                    "line": 4,
+                    "column": 19
+                  }
+                }
+              ],
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 4,
+                "column": 5
+              }
+            }
+          ],
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 3,
+            "column": 20
+          }
+        },
+        "ports": {
+          "kind": "AnsiPortList",
+          "ports": [
+            {
+              "kind": "ImplicitAnsiPort",
+              "header": {
+                "kind": "InterfacePortHeader",
+                "nameOrKeyword": "interface",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 6,
+                  "column": 5
+                }
+              },
+              "declarator": {
+                "kind": "Declarator",
+                "name": "A",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 6,
+                  "column": 15
+                }
+              },
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 6,
+                "column": 5
+              }
+            },
+            {
+              "kind": "ImplicitAnsiPort",
+              "header": {
+                "kind": "InterfacePortHeader",
+                "nameOrKeyword": "interface",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 7,
+                  "column": 5
+                }
+              },
+              "declarator": {
+                "kind": "Declarator",
+                "name": "B",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 7,
+                  "column": 15
+                }
+              },
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 7,
+                "column": 5
+              }
+            },
+            {
+              "kind": "ImplicitAnsiPort",
+              "header": {
+                "kind": "InterfacePortHeader",
+                "nameOrKeyword": "interface",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 8,
+                  "column": 5
+                }
+              },
+              "declarator": {
+                "kind": "Declarator",
+                "name": "SUM",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 8,
+                  "column": 15
+                }
+              },
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 8,
+                "column": 5
+              }
+            }
+          ],
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 5,
+            "column": 3
+          }
+        },
+        "body": [
+          {
+            "kind": "DataDeclaration",
+            "type": {
+              "kind": "LogicType",
+              "keyword": "logic",
+              "dimensions": [
+                {
+                  "kind": "VariableDimension",
+                  "specifier": {
+                    "kind": "RangeDimensionSpecifier",
+                    "selector": {
+                      "kind": "SimpleRangeSelect",
+                      "left": {
+                        "kind": "SubtractExpression",
+                        "left": {
+                          "kind": "Name",
+                          "name": "WIDTH",
+                          "location": {
+                            "file": "examples/async_adder.sv",
+                            "line": 10,
+                            "column": 12
+                          }
+                        },
+                        "operatorToken": "-",
+                        "right": {
+                          "kind": "IntegerLiteralExpression",
+                          "literal": "1",
+                          "location": {
+                            "file": "examples/async_adder.sv",
+                            "line": 10,
+                            "column": 18
+                          }
+                        },
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 10,
+                          "column": 12
+                        }
+                      },
+                      "range": ":",
+                      "right": {
+                        "kind": "IntegerLiteralExpression",
+                        "literal": "0",
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 10,
+                          "column": 20
+                        }
+                      },
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 10,
+                        "column": 12
+                      }
+                    },
+                    "location": {
+                      "file": "examples/async_adder.sv",
+                      "line": 10,
+                      "column": 12
+                    }
+                  },
+                  "location": {
+                    "file": "examples/async_adder.sv",
+                    "line": 10,
+                    "column": 11
+                  }
+                }
+              ],
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 10,
+                "column": 5
+              }
+            },
+            "declarators": [
+              {
+                "kind": "Declarator",
+                "name": "a",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 10,
+                  "column": 23
+                }
+              },
+              {
+                "kind": "Declarator",
+                "name": "b",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 10,
+                  "column": 26
+                }
+              }
+            ],
+            "location": {
+              "file": "examples/async_adder.sv",
+              "line": 10,
+              "column": 5
+            }
+          },
+          {
+            "kind": "DataDeclaration",
+            "type": {
+              "kind": "LogicType",
+              "keyword": "logic",
+              "dimensions": [
+                {
+                  "kind": "VariableDimension",
+                  "specifier": {
+                    "kind": "RangeDimensionSpecifier",
+                    "selector": {
+                      "kind": "SimpleRangeSelect",
+                      "left": {
+                        "kind": "Name",
+                        "name": "WIDTH",
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 11,
+                          "column": 12
+                        }
+                      },
+                      "range": ":",
+                      "right": {
+                        "kind": "IntegerLiteralExpression",
+                        "literal": "0",
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 11,
+                          "column": 18
+                        }
+                      },
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 11,
+                        "column": 12
+                      }
+                    },
+                    "location": {
+                      "file": "examples/async_adder.sv",
+                      "line": 11,
+                      "column": 12
+                    }
+                  },
+                  "location": {
+                    "file": "examples/async_adder.sv",
+                    "line": 11,
+                    "column": 11
+                  }
+                }
+              ],
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 11,
+                "column": 5
+              }
+            },
+            "declarators": [
+              {
+                "kind": "Declarator",
+                "name": "sum",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 11,
+                  "column": 21
+                }
+              }
+            ],
+            "location": {
+              "file": "examples/async_adder.sv",
+              "line": 11,
+              "column": 5
+            }
+          },
+          {
+            "kind": "Process",
+            "process_kind": "always",
+            "body": {
+              "kind": "Sequence",
+              "body": [
+                {
+                  "kind": "Parallel",
+                  "body": [
+                    {
+                      "kind": "ExpressionStatement",
+                      "expr": {
+                        "kind": "Call",
+                        "callee": {
+                          "kind": "Member",
+                          "object": {
+                            "kind": "Name",
+                            "name": "A",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 15,
+                              "column": 13
+                            }
+                          },
+                          "member": {
+                            "kind": "Name",
+                            "name": "Receive",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 15,
+                              "column": 15
+                            }
+                          },
+                          "location": {
+                            "file": "examples/async_adder.sv",
+                            "line": 15,
+                            "column": 13
+                          }
+                        },
+                        "arguments": [
+                          {
+                            "kind": "OrderedArgument",
+                            "expr": {
+                              "kind": "Name",
+                              "name": "a",
+                              "location": {
+                                "file": "examples/async_adder.sv",
+                                "line": 15,
+                                "column": 23
+                              }
+                            },
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 15,
+                              "column": 23
+                            }
+                          }
+                        ],
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 15,
+                          "column": 13
+                        }
+                      },
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 15,
+                        "column": 13
+                      }
+                    },
+                    {
+                      "kind": "ExpressionStatement",
+                      "expr": {
+                        "kind": "Call",
+                        "callee": {
+                          "kind": "Member",
+                          "object": {
+                            "kind": "Name",
+                            "name": "B",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 16,
+                              "column": 13
+                            }
+                          },
+                          "member": {
+                            "kind": "Name",
+                            "name": "Receive",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 16,
+                              "column": 15
+                            }
+                          },
+                          "location": {
+                            "file": "examples/async_adder.sv",
+                            "line": 16,
+                            "column": 13
+                          }
+                        },
+                        "arguments": [
+                          {
+                            "kind": "OrderedArgument",
+                            "expr": {
+                              "kind": "Name",
+                              "name": "b",
+                              "location": {
+                                "file": "examples/async_adder.sv",
+                                "line": 16,
+                                "column": 23
+                              }
+                            },
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 16,
+                              "column": 23
+                            }
+                          }
+                        ],
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 16,
+                          "column": 13
+                        }
+                      },
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 16,
+                        "column": 13
+                      }
+                    }
+                  ],
+                  "join": "join",
+                  "location": {
+                    "file": "examples/async_adder.sv",
+                    "line": 14,
+                    "column": 9
+                  }
+                },
+                {
+                  "kind": "ExpressionStatement",
+                  "expr": {
+                    "kind": "AssignmentExpression",
+                    "left": {
+                      "kind": "Name",
+                      "name": "sum",
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 18,
+                        "column": 9
+                      }
+                    },
+                    "operatorToken": "=",
+                    "right": {
+                      "kind": "AddExpression",
+                      "left": {
+                        "kind": "ConcatenationExpression",
+                        "expressions": [
+                          {
+                            "kind": "IntegerVectorExpression",
+                            "size": "1",
+                            "base": "'b",
+                            "value": "0",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 18,
+                              "column": 16
+                            }
+                          },
+                          {
+                            "kind": "Name",
+                            "name": "a",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 18,
+                              "column": 22
+                            }
+                          }
+                        ],
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 18,
+                          "column": 15
+                        }
+                      },
+                      "operatorToken": "+",
+                      "right": {
+                        "kind": "ConcatenationExpression",
+                        "expressions": [
+                          {
+                            "kind": "IntegerVectorExpression",
+                            "size": "1",
+                            "base": "'b",
+                            "value": "0",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 18,
+                              "column": 28
+                            }
+                          },
+                          {
+                            "kind": "Name",
+                            "name": "b",
+                            "location": {
+                              "file": "examples/async_adder.sv",
+                              "line": 18,
+                              "column": 34
+                            }
+                          }
+                        ],
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 18,
+                          "column": 27
+                        }
+                      },
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 18,
+                        "column": 15
+                      }
+                    },
+                    "location": {
+                      "file": "examples/async_adder.sv",
+                      "line": 18,
+                      "column": 9
+                    }
+                  },
+                  "location": {
+                    "file": "examples/async_adder.sv",
+                    "line": 18,
+                    "column": 9
+                  }
+                },
+                {
+                  "kind": "ExpressionStatement",
+                  "expr": {
+                    "kind": "Call",
+                    "callee": {
+                      "kind": "Member",
+                      "object": {
+                        "kind": "Name",
+                        "name": "SUM",
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 19,
+                          "column": 9
+                        }
+                      },
+                      "member": {
+                        "kind": "Name",
+                        "name": "Send",
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 19,
+                          "column": 13
+                        }
+                      },
+                      "location": {
+                        "file": "examples/async_adder.sv",
+                        "line": 19,
+                        "column": 9
+                      }
+                    },
+                    "arguments": [
+                      {
+                        "kind": "OrderedArgument",
+                        "expr": {
+                          "kind": "Name",
+                          "name": "sum",
+                          "location": {
+                            "file": "examples/async_adder.sv",
+                            "line": 19,
+                            "column": 18
+                          }
+                        },
+                        "location": {
+                          "file": "examples/async_adder.sv",
+                          "line": 19,
+                          "column": 18
+                        }
+                      }
+                    ],
+                    "location": {
+                      "file": "examples/async_adder.sv",
+                      "line": 19,
+                      "column": 9
+                    }
+                  },
+                  "location": {
+                    "file": "examples/async_adder.sv",
+                    "line": 19,
+                    "column": 9
+                  }
+                }
+              ],
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 13,
+                "column": 12
+              }
+            },
+            "location": {
+              "file": "examples/async_adder.sv",
+              "line": 13,
+              "column": 5
+            }
+          }
+        ],
+        "location": {
+          "file": "examples/async_adder.sv",
+          "line": 3,
+          "column": 1
+        }
+      }
+    ],
+    "warnings": [],
+    "location": {
+      "file": "examples/async_adder.sv",
+      "line": 3,
+      "column": 1
+    }
+  }
+}

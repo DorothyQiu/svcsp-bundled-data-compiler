@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "analysis": "module-local syntactic may-use",
+  "parse_warnings": [],
+  "modules": [
+    {
+      "module": "async_adder",
+      "location": {
+        "file": "examples/async_adder.sv",
+        "line": 3,
+        "column": 1
+      },
+      "analysis_complete": true,
+      "channels": [
+        {
+          "name": "A",
+          "scope": "port",
+          "direction": "input",
+          "dimensions": [],
+          "modport": null,
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 6,
+            "column": 5
+          },
+          "uses": [
+            {
+              "method": "Receive",
+              "role": "input",
+              "receiver": {
+                "kind": "Name",
+                "name": "A",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 15,
+                  "column": 13
+                }
+              },
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 15,
+                "column": 13
+              }
+            }
+          ]
+        },
+        {
+          "name": "B",
+          "scope": "port",
+          "direction": "input",
+          "dimensions": [],
+          "modport": null,
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 7,
+            "column": 5
+          },
+          "uses": [
+            {
+              "method": "Receive",
+              "role": "input",
+              "receiver": {
+                "kind": "Name",
+                "name": "B",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 16,
+                  "column": 13
+                }
+              },
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 16,
+                "column": 13
+              }
+            }
+          ]
+        },
+        {
+          "name": "SUM",
+          "scope": "port",
+          "direction": "output",
+          "dimensions": [],
+          "modport": null,
+          "location": {
+            "file": "examples/async_adder.sv",
+            "line": 8,
+            "column": 5
+          },
+          "uses": [
+            {
+              "method": "Send",
+              "role": "output",
+              "receiver": {
+                "kind": "Name",
+                "name": "SUM",
+                "location": {
+                  "file": "examples/async_adder.sv",
+                  "line": 19,
+                  "column": 9
+                }
+              },
+              "location": {
+                "file": "examples/async_adder.sv",
+                "line": 19,
+                "column": 9
+              }
+            }
+          ]
+        }
+      ],
+      "diagnostics": []
+    }
+  ]
+}

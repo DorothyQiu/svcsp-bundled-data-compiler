@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: svcsp
+Version: 0.2.0
+Summary: SystemVerilog CSP frontend and four-phase structural Verilog compiler
+Requires-Python: >=3.10
+Requires-Dist: pyslang==11.0.0
