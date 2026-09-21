@@ -100,6 +100,7 @@ class MicroarchitectureGraph:
     dependencies: tuple[MicroarchitectureDependency, ...]
     metadata: tuple[MicroarchitectureMetadata, ...]
     wrappers: tuple[MicroarchitectureWrapper, ...]
+    parameters: tuple[behavioral.Parameter, ...] = ()
 
     def stage(self, stage_id: str) -> MicroarchitectureStage | None:
         return next((stage for stage in self.stages if stage.id == stage_id), None)
@@ -222,4 +223,4 @@ def select_microarchitecture(graph: pipeline.PipelineGraph) -> Microarchitecture
                          for edge in graph.dependencies)
     metadata = tuple(MicroarchitectureMetadata(item.id, item.kind, item.operation, item.enable, item.location)
                      for item in graph.metadata)
-    return MicroarchitectureGraph(graph.module, tuple(stages), dependencies, metadata, wrappers)
+    return MicroarchitectureGraph(graph.module, tuple(stages), dependencies, metadata, wrappers, graph.parameters)

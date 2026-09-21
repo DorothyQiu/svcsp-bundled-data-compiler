@@ -145,20 +145,20 @@ if (c) A.Send(x + y); endmodule''')
     enable = signal_map[graph.bindings_for(wrapper.id, 'enable')[0].signal_id]
     payload = signal_map[graph.bindings_for(wrapper.id, 'body_data')[0].signal_id]
     assert enable.enable is wrapper.enable
-    assert payload.expression.form == 'binary'
-    assert payload.source_stage == wrapper.attached_to
+    assert payload.expression is None
+    assert payload.drivers[0].owner.startswith('storage_')
 
 
 def test_data_dependency_has_explicit_payload_connection_mapping():
     graph = bind('''module m(interface A, B); logic x, y, increment; always begin
 A.Receive(x); y = x + increment; B.Send(y); end endmodule''')
     signal_map = signals(graph)
-    payload_bindings = [binding for binding in graph.port_bindings if binding.port_name == 'payload_in']
-    payloads = [signal_map[binding.signal_id] for binding in payload_bindings]
-    assert any(payload.variable is not None and payload.variable.name == 'x' and
-               payload.source_stage is not None and payload.target_stage is not None for payload in payloads)
-    assert any(payload.variable is not None and payload.variable.name == 'y' and
-               payload.source_stage is not None and payload.target_stage is not None for payload in payloads)
+    storage_inputs = [signal_map[binding.signal_id] for binding in graph.port_bindings
+                      if binding.port_name == 'data_in']
+    storage_outputs = [signal_map[binding.signal_id] for binding in graph.port_bindings
+                       if binding.port_name == 'data_out']
+    assert any(signal.expression is not None and signal.expression.form == 'binary' for signal in storage_inputs)
+    assert all(len(signal.drivers) == 1 for signal in storage_outputs)
 
 
 def test_every_required_template_port_has_a_connection():

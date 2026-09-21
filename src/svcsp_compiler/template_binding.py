@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import hashlib
+import re
 
 from . import behavioral_ir as behavioral
 from . import communication_normalization as normalization
@@ -37,6 +39,26 @@ class PortSemanticKind(str, Enum):
     CONTROL = 'control'
 
 
+class ModulePortRole(str, Enum):
+    REQUEST = 'request'
+    ACKNOWLEDGE = 'acknowledge'
+    PAYLOAD = 'payload'
+
+
+class SignalDriverKind(str, Enum):
+    EXPRESSION = 'expression'
+    TEMPLATE_OUTPUT = 'template_output'
+    MODULE_INPUT = 'module_input'
+
+
+@dataclass(frozen=True)
+class BoundSignalDriver:
+    """The one architectural source permitted to drive a logical signal."""
+
+    kind: SignalDriverKind
+    owner: str
+
+
 @dataclass(frozen=True)
 class TemplatePort:
     """A syntax-independent formal template port.
@@ -51,6 +73,23 @@ class TemplatePort:
     semantic_kind: PortSemanticKind
     minimum: int = 0
     maximum: int | None = None
+    formal_name: str | None = None
+    family_formal_pattern: str | None = '{name}_{index}'
+
+    def resolved_formal_name(self, index: int) -> str:
+        """Return the exact template formal name for this bound member."""
+        if index < 0:
+            raise TemplateBindingError(f'{self.name} has a negative port-family index')
+        if self.maximum is not None:
+            if index:
+                raise TemplateBindingError(f'{self.name} is not a port family')
+            return self.formal_name or self.name
+        if self.family_formal_pattern is None:
+            raise TemplateBindingError(f'{self.name} has no formal-name pattern')
+        try:
+            return self.family_formal_pattern.format(name=self.formal_name or self.name, index=index)
+        except (KeyError, ValueError) as error:
+            raise TemplateBindingError(f'{self.name} has an invalid formal-name pattern') from error
 
 
 @dataclass(frozen=True)
@@ -76,16 +115,8 @@ TEMPLATE_CONTRACTS: tuple[TemplateContract, ...] = (
                      PortSemanticKind.HANDSHAKE_REQUEST),
         TemplatePort('downstream_ack', 'downstream handshake acknowledge', PortDirection.INPUT,
                      PortSemanticKind.HANDSHAKE_ACKNOWLEDGE),
-        TemplatePort('payload_in', 'upstream or external payload', PortDirection.INPUT,
-                     PortSemanticKind.PAYLOAD),
-        TemplatePort('payload_out', 'downstream or external payload', PortDirection.OUTPUT,
-                     PortSemanticKind.PAYLOAD),
         TemplatePort('local_control', 'local stage control', PortDirection.OUTPUT,
                      PortSemanticKind.CONTROL, minimum=1, maximum=1),
-        TemplatePort('storage_data_in', 'storage payload input', PortDirection.OUTPUT,
-                     PortSemanticKind.PAYLOAD, maximum=1),
-        TemplatePort('storage_data_out', 'storage payload output', PortDirection.INPUT,
-                     PortSemanticKind.PAYLOAD, maximum=1),
         TemplatePort('storage_control', 'storage control return', PortDirection.INPUT,
                      PortSemanticKind.CONTROL, maximum=1),
         TemplatePort('delayed_control', 'matched-delay control return', PortDirection.INPUT,
@@ -177,6 +208,8 @@ class BoundLogicalSignal:
     payload_type: behavioral.PayloadType | None = None
     width: behavioral.PayloadWidth | None = None
     location: behavioral.SourceLocation | None = None
+    is_module_port: bool = False
+    drivers: tuple[BoundSignalDriver, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -187,6 +220,22 @@ class BoundPortBinding:
     port_name: str
     signal_id: str
     index: int = 0
+    formal_name: str = ''
+
+
+@dataclass(frozen=True)
+class BoundModulePort:
+    """An exact top-level SystemVerilog port already resolved by Phase 7A."""
+
+    name: str
+    direction: PortDirection
+    role: ModulePortRole
+    semantic_kind: PortSemanticKind
+    signal_id: str
+    endpoint: behavioral.ChannelEndpoint
+    payload_type: behavioral.PayloadType | None = None
+    width: behavioral.PayloadWidth | None = None
+    location: behavioral.SourceLocation | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +311,8 @@ class BoundStructuralGraph:
     metadata: tuple[microarchitecture.MicroarchitectureMetadata, ...]
     signals: tuple[BoundLogicalSignal, ...]
     port_bindings: tuple[BoundPortBinding, ...]
+    parameters: tuple[behavioral.Parameter, ...] = ()
+    module_ports: tuple[BoundModulePort, ...] = ()
 
     def stage(self, stage_id: str) -> BoundBodyStage | None:
         return next((stage for stage in self.body_stages if stage.id == stage_id), None)
@@ -379,7 +430,8 @@ def _validate_payload_contexts(graph: microarchitecture.MicroarchitectureGraph) 
 
 
 class _Bindings:
-    def __init__(self) -> None:
+    def __init__(self, contracts: dict[str, TemplateContract]) -> None:
+        self.contracts = contracts
         self.signals: list[BoundLogicalSignal] = []
         self.bindings: list[BoundPortBinding] = []
         self._signal_ids: set[str] = set()
@@ -403,10 +455,74 @@ class _Bindings:
         return signal
 
     def bind(self, instance_id: str, port_name: str, signal: BoundLogicalSignal) -> None:
+        contract = self.contracts.get(instance_id)
+        port = contract.port(port_name) if contract else None
+        if port is None:
+            raise TemplateBindingError(f'{instance_id} has no port {port_name}')
         key = (instance_id, port_name)
         index = self._port_indexes.get(key, 0)
         self._port_indexes[key] = index + 1
-        self.bindings.append(BoundPortBinding(instance_id, port_name, signal.id, index))
+        self.bindings.append(BoundPortBinding(instance_id, port_name, signal.id, index,
+                                              port.resolved_formal_name(index)))
+
+
+_PORT_IDENTIFIER = re.compile(r'[^A-Za-z0-9_$]')
+
+
+class _ModulePorts:
+    """Create shared external endpoint signals and their module-port contracts."""
+
+    def __init__(self, bindings: _Bindings) -> None:
+        self.bindings = bindings
+        self.ports: list[BoundModulePort] = []
+        self._by_identity: dict[tuple[behavioral.ChannelEndpoint, str, ModulePortRole], BoundLogicalSignal] = {}
+        self._names: set[str] = set()
+
+    @staticmethod
+    def _selector_text(expression: behavioral.Expression) -> str:
+        if expression.form == 'literal' and expression.value is not None:
+            return expression.value
+        if expression.form == 'parameter' and expression.parameter is not None:
+            return expression.parameter.name
+        return expression.form
+
+    def _name(self, endpoint: behavioral.ChannelEndpoint, flow: str, role: ModulePortRole) -> str:
+        selector = '_'.join(self._selector_text(item) for item in endpoint.selectors)
+        raw = '_'.join(part for part in ('channel', endpoint.name, selector, flow, role.value) if part)
+        candidate = _PORT_IDENTIFIER.sub('_', raw)
+        if not candidate or candidate[0].isdigit():
+            candidate = f'channel_{candidate}'
+        if candidate not in self._names:
+            self._names.add(candidate)
+            return candidate
+        digest = hashlib.sha1(repr((endpoint, flow, role)).encode('utf-8')).hexdigest()[:10]
+        candidate = f'{candidate}_{digest}'
+        if candidate in self._names:
+            raise TemplateBindingError(f'cannot create collision-safe module port for {endpoint.name}')
+        self._names.add(candidate)
+        return candidate
+
+    def external(self, endpoint: behavioral.ChannelEndpoint, flow: str, role: ModulePortRole,
+                 direction: PortDirection, semantic_kind: PortSemanticKind,
+                 payload_type: behavioral.PayloadType | None,
+                 location: behavioral.SourceLocation | None,
+                 *, variable: behavioral.Variable | None = None,
+                 expression: behavioral.Expression | None = None) -> BoundLogicalSignal:
+        key = (endpoint, flow, role)
+        existing = self._by_identity.get(key)
+        if existing is not None:
+            if existing.semantic_kind is not semantic_kind or existing.payload_type != payload_type:
+                raise TemplateBindingError(f'external endpoint {endpoint.name} has inconsistent port binding')
+            return existing
+        name = self._name(endpoint, flow, role)
+        signal = self.bindings.signal(BoundLogicalSignal(
+            f'module_port_{name}', semantic_kind, endpoint=endpoint, variable=variable,
+            expression=expression, payload_type=payload_type, location=location, is_module_port=True,
+        ))
+        self.ports.append(BoundModulePort(name, direction, role, semantic_kind, signal.id, endpoint,
+                                          payload_type, signal.width, location))
+        self._by_identity[key] = signal
+        return signal
 
 
 def _handshake_signals(graph: microarchitecture.MicroarchitectureGraph,
@@ -453,72 +569,49 @@ def _bind_stage_topology(graph: microarchitecture.MicroarchitectureGraph, bindin
             bindings.bind(stage.id, 'downstream_ack', acknowledge)
 
 
-def _bind_data_dependencies(graph: microarchitecture.MicroarchitectureGraph, bindings: _Bindings) -> None:
-    stages = {stage.id: stage for stage in graph.stages}
-    for edge in graph.dependencies:
-        if edge.kind is not dependency.DependencyKind.DATA or not edge.source_stage or not edge.target_stage:
-            continue
-        source = stages[edge.source_stage]
-        variable = source.variable
-        expression = None
-        if source.body_operations:
-            variable, expression = _operation_payload(source.body_operations[0].operation)
-        signal = bindings.signal(BoundLogicalSignal(
-            f'payload_{edge.source_node}_{edge.target_node}', PortSemanticKind.PAYLOAD,
-            edge.source_stage, edge.target_stage, edge.kind, variable=variable, expression=expression,
-            payload_type=_payload_type(variable, source.endpoint),
-            location=source.location,
-        ))
-        bindings.bind(source.id, 'payload_out', signal)
-        bindings.bind(edge.target_stage, 'payload_in', signal)
-
-
 def _bind_unconditional_external_operations(graph: microarchitecture.MicroarchitectureGraph,
-                                            bindings: _Bindings) -> None:
+                                            bindings: _Bindings, module_ports: _ModulePorts) -> dict[str, BoundLogicalSignal]:
+    payloads: dict[str, BoundLogicalSignal] = {}
     for stage in graph.stages:
         for node in stage.body_operations:
             operation = node.operation
             if isinstance(operation, behavioral.Receive):
-                request = bindings.signal(BoundLogicalSignal(
-                    f'{stage.id}_external_req', PortSemanticKind.HANDSHAKE_REQUEST,
-                    target_stage=stage.id, endpoint=operation.channel, location=operation.location,
-                ))
-                acknowledge = bindings.signal(BoundLogicalSignal(
-                    f'{stage.id}_external_ack', PortSemanticKind.HANDSHAKE_ACKNOWLEDGE,
-                    source_stage=stage.id, endpoint=operation.channel, location=operation.location,
-                ))
-                payload = bindings.signal(BoundLogicalSignal(
-                    f'{stage.id}_external_payload', PortSemanticKind.PAYLOAD, target_stage=stage.id,
-                    endpoint=operation.channel,
-                    variable=operation.target if isinstance(operation.target, behavioral.Variable) else operation.target.variable,
-                    payload_type=operation.channel.payload_type,
-                    location=operation.location,
-                ))
+                target = operation.target if isinstance(operation.target, behavioral.Variable) else operation.target.variable
+                request = module_ports.external(operation.channel, 'receive', ModulePortRole.REQUEST,
+                                                PortDirection.INPUT, PortSemanticKind.HANDSHAKE_REQUEST,
+                                                None, operation.location)
+                acknowledge = module_ports.external(operation.channel, 'receive', ModulePortRole.ACKNOWLEDGE,
+                                                    PortDirection.OUTPUT, PortSemanticKind.HANDSHAKE_ACKNOWLEDGE,
+                                                    None, operation.location)
+                payload = module_ports.external(operation.channel, 'receive', ModulePortRole.PAYLOAD,
+                                                PortDirection.INPUT, PortSemanticKind.PAYLOAD,
+                                                operation.channel.payload_type, operation.location, variable=target)
                 bindings.bind(stage.id, 'upstream_req', request)
                 bindings.bind(stage.id, 'upstream_ack', acknowledge)
-                bindings.bind(stage.id, 'payload_in', payload)
+                payloads[stage.id] = payload
             if isinstance(operation, behavioral.Send):
                 variable, expression = _operation_payload(operation)
-                request = bindings.signal(BoundLogicalSignal(
-                    f'{stage.id}_external_req', PortSemanticKind.HANDSHAKE_REQUEST,
-                    source_stage=stage.id, endpoint=operation.channel, location=operation.location,
-                ))
-                acknowledge = bindings.signal(BoundLogicalSignal(
-                    f'{stage.id}_external_ack', PortSemanticKind.HANDSHAKE_ACKNOWLEDGE,
-                    target_stage=stage.id, endpoint=operation.channel, location=operation.location,
-                ))
-                payload = bindings.signal(BoundLogicalSignal(
-                    f'{stage.id}_external_payload', PortSemanticKind.PAYLOAD, source_stage=stage.id,
-                    endpoint=operation.channel, variable=variable, expression=expression, location=operation.location,
-                    payload_type=operation.channel.payload_type,
-                ))
+                request = module_ports.external(operation.channel, 'send', ModulePortRole.REQUEST,
+                                                PortDirection.OUTPUT, PortSemanticKind.HANDSHAKE_REQUEST,
+                                                None, operation.location)
+                acknowledge = module_ports.external(operation.channel, 'send', ModulePortRole.ACKNOWLEDGE,
+                                                    PortDirection.INPUT, PortSemanticKind.HANDSHAKE_ACKNOWLEDGE,
+                                                    None, operation.location)
+                payload = module_ports.external(operation.channel, 'send', ModulePortRole.PAYLOAD,
+                                                PortDirection.OUTPUT, PortSemanticKind.PAYLOAD,
+                                                operation.channel.payload_type, operation.location,
+                                                variable=variable)
                 bindings.bind(stage.id, 'downstream_req', request)
                 bindings.bind(stage.id, 'downstream_ack', acknowledge)
-                bindings.bind(stage.id, 'payload_out', payload)
+                payloads[stage.id] = payload
+    return payloads
 
 
-def _bind_wrapper_ports(graph: microarchitecture.MicroarchitectureGraph, bindings: _Bindings) -> None:
+def _bind_wrapper_ports(graph: microarchitecture.MicroarchitectureGraph, bindings: _Bindings,
+                        module_ports: _ModulePorts,
+                        stages: dict[str, BoundBodyStage]) -> dict[str, tuple[BoundLogicalSignal, behavioral.Expression]]:
     operations = {item.id: item.operation for item in graph.metadata if item.kind is dependency.NodeKind.WRAPPER}
+    send_payloads: dict[str, tuple[BoundLogicalSignal, behavioral.Expression]] = {}
     for wrapper in graph.wrappers:
         operation = operations.get(wrapper.id)
         if not isinstance(operation, (normalization.NormalizedReceive, normalization.NormalizedSend)):
@@ -528,46 +621,46 @@ def _bind_wrapper_ports(graph: microarchitecture.MicroarchitectureGraph, binding
             f'{wrapper.id}_enable', PortSemanticKind.ENABLE, enable=wrapper.enable, location=wrapper.location,
         ))
         bindings.bind(wrapper.id, 'enable', enable)
-        external_req = bindings.signal(BoundLogicalSignal(
-            f'{wrapper.id}_external_req', PortSemanticKind.HANDSHAKE_REQUEST,
-            endpoint=wrapper.endpoint, location=wrapper.location,
-        ))
-        external_ack = bindings.signal(BoundLogicalSignal(
-            f'{wrapper.id}_external_ack', PortSemanticKind.HANDSHAKE_ACKNOWLEDGE,
-            endpoint=wrapper.endpoint, location=wrapper.location,
-        ))
-        external_payload = bindings.signal(BoundLogicalSignal(
-            f'{wrapper.id}_external_payload', PortSemanticKind.PAYLOAD, endpoint=wrapper.endpoint,
-            variable=variable, expression=expression, location=wrapper.location,
-            payload_type=wrapper.endpoint.payload_type,
-        ))
+        receiving = isinstance(operation, normalization.NormalizedReceive)
+        flow = 'receive' if receiving else 'send'
+        external_req = module_ports.external(wrapper.endpoint, flow, ModulePortRole.REQUEST,
+                                             PortDirection.INPUT if receiving else PortDirection.OUTPUT,
+                                             PortSemanticKind.HANDSHAKE_REQUEST, None, wrapper.location)
+        external_ack = module_ports.external(wrapper.endpoint, flow, ModulePortRole.ACKNOWLEDGE,
+                                             PortDirection.OUTPUT if receiving else PortDirection.INPUT,
+                                             PortSemanticKind.HANDSHAKE_ACKNOWLEDGE, None, wrapper.location)
+        external_payload = module_ports.external(wrapper.endpoint, flow, ModulePortRole.PAYLOAD,
+                                                 PortDirection.INPUT if receiving else PortDirection.OUTPUT,
+                                                 PortSemanticKind.PAYLOAD, wrapper.endpoint.payload_type,
+                                                 wrapper.location, variable=variable)
         body_req = bindings.signal(BoundLogicalSignal(
             f'{wrapper.id}_body_req', PortSemanticKind.HANDSHAKE_REQUEST,
-            source_stage=wrapper.attached_to if isinstance(operation, normalization.NormalizedSend) else None,
-            target_stage=wrapper.attached_to if isinstance(operation, normalization.NormalizedReceive) else None,
+            source_stage=wrapper.attached_to if not receiving else None,
+            target_stage=wrapper.attached_to if receiving else None,
             endpoint=wrapper.endpoint, location=wrapper.location,
         ))
         body_ack = bindings.signal(BoundLogicalSignal(
             f'{wrapper.id}_body_ack', PortSemanticKind.HANDSHAKE_ACKNOWLEDGE,
-            source_stage=wrapper.attached_to if isinstance(operation, normalization.NormalizedReceive) else None,
-            target_stage=wrapper.attached_to if isinstance(operation, normalization.NormalizedSend) else None,
+            source_stage=wrapper.attached_to if receiving else None,
+            target_stage=wrapper.attached_to if not receiving else None,
             endpoint=wrapper.endpoint, location=wrapper.location,
         ))
         body_payload = bindings.signal(BoundLogicalSignal(
             f'{wrapper.id}_body_payload', PortSemanticKind.PAYLOAD,
-            source_stage=wrapper.attached_to if isinstance(operation, normalization.NormalizedSend) else None,
-            target_stage=wrapper.attached_to if isinstance(operation, normalization.NormalizedReceive) else None,
-            endpoint=wrapper.endpoint, variable=variable, expression=expression, location=wrapper.location,
+            source_stage=wrapper.attached_to if not receiving else None,
+            target_stage=wrapper.attached_to if receiving else None,
+            endpoint=wrapper.endpoint, variable=variable,
+            expression=None if (not receiving and stages[wrapper.attached_to].storage) else expression,
+            location=wrapper.location,
             payload_type=wrapper.endpoint.payload_type,
         ))
-        if isinstance(operation, normalization.NormalizedReceive):
+        if receiving:
             for port, signal in (('external_req', external_req), ('external_ack', external_ack),
                                  ('external_data', external_payload), ('body_req', body_req),
                                  ('body_ack', body_ack), ('body_data', body_payload)):
                 bindings.bind(wrapper.id, port, signal)
             bindings.bind(wrapper.attached_to, 'upstream_req', body_req)
             bindings.bind(wrapper.attached_to, 'upstream_ack', body_ack)
-            bindings.bind(wrapper.attached_to, 'payload_in', body_payload)
         else:
             for port, signal in (('body_req', body_req), ('body_ack', body_ack), ('body_data', body_payload),
                                  ('external_req', external_req), ('external_ack', external_ack),
@@ -575,30 +668,58 @@ def _bind_wrapper_ports(graph: microarchitecture.MicroarchitectureGraph, binding
                 bindings.bind(wrapper.id, port, signal)
             bindings.bind(wrapper.attached_to, 'downstream_req', body_req)
             bindings.bind(wrapper.attached_to, 'downstream_ack', body_ack)
-            bindings.bind(wrapper.attached_to, 'payload_out', body_payload)
+            assert expression is not None
+            send_payloads[wrapper.attached_to] = (body_payload, expression)
+    return send_payloads
 
 
 def _bind_storage_and_delays(stages: tuple[BoundBodyStage, ...], wrappers: tuple[BoundWrapper, ...],
-                             bindings: _Bindings) -> None:
+                             bindings: _Bindings,
+                             external_payloads: dict[str, BoundLogicalSignal],
+                             wrapper_send_payloads: dict[str, tuple[BoundLogicalSignal, behavioral.Expression]]) -> None:
     wrapper_endpoints = {wrapper.attached_to: wrapper.endpoint for wrapper in wrappers}
     for stage in stages:
         control = next(signal for signal in bindings.signals if signal.id == f'{stage.id}_local_control')
         if stage.storage:
             payload_type = _payload_type(stage.variable, stage.endpoint or wrapper_endpoints.get(stage.id))
-            data_in = bindings.signal(BoundLogicalSignal(
-                f'{stage.storage.id}_data_in', PortSemanticKind.PAYLOAD, source_stage=stage.id,
-                variable=stage.variable, payload_type=payload_type, location=stage.location,
-            ))
-            data_out = bindings.signal(BoundLogicalSignal(
-                f'{stage.storage.id}_data_out', PortSemanticKind.PAYLOAD, target_stage=stage.id,
-                variable=stage.variable, payload_type=payload_type, location=stage.location,
-            ))
+            variable = stage.variable
+            operation = stage.operations[0].operation if stage.operations else None
+            wrapper_payload = wrapper_send_payloads.get(stage.id)
+            if wrapper_payload is not None:
+                data_out, expression = wrapper_payload
+                variables = _expression_variables(expression)
+                variable = variables[0] if len(variables) == 1 else None
+                data_in = bindings.signal(BoundLogicalSignal(
+                    f'{stage.storage.id}_data_in', PortSemanticKind.PAYLOAD, source_stage=stage.id,
+                    variable=variable, expression=expression, payload_type=payload_type, location=stage.location,
+                ))
+            elif isinstance(operation, behavioral.Receive):
+                data_in = external_payloads.get(stage.id)
+                if data_in is None:
+                    raise TemplateBindingError(f'{stage.id} receive has no external payload binding')
+            else:
+                variable, expression = _operation_payload(operation)
+                if expression is None:
+                    raise TemplateBindingError(f'{stage.id} storage has no explicit datapath source')
+                data_in = bindings.signal(BoundLogicalSignal(
+                    f'{stage.storage.id}_data_in', PortSemanticKind.PAYLOAD, source_stage=stage.id,
+                    variable=variable, expression=expression, payload_type=payload_type, location=stage.location,
+                ))
+            if wrapper_payload is not None:
+                pass
+            elif isinstance(operation, behavioral.Send):
+                data_out = external_payloads.get(stage.id)
+                if data_out is None:
+                    raise TemplateBindingError(f'{stage.id} send has no external payload binding')
+            else:
+                data_out = bindings.signal(BoundLogicalSignal(
+                    f'{stage.storage.id}_data_out', PortSemanticKind.PAYLOAD, target_stage=stage.id,
+                    variable=stage.variable, payload_type=payload_type, location=stage.location,
+                ))
             control_out = bindings.signal(BoundLogicalSignal(
                 f'{stage.storage.id}_control_out', PortSemanticKind.CONTROL, target_stage=stage.id,
                 location=stage.location,
             ))
-            bindings.bind(stage.id, 'storage_data_in', data_in)
-            bindings.bind(stage.id, 'storage_data_out', data_out)
             bindings.bind(stage.id, 'storage_control', control_out)
             bindings.bind(stage.storage.id, 'data_in', data_in)
             bindings.bind(stage.storage.id, 'data_out', data_out)
@@ -638,6 +759,8 @@ def _validate_bindings(stages: tuple[BoundBodyStage, ...], wrappers: tuple[Bound
             raise TemplateBindingError(f'port binding refers to unknown signal {binding.signal_id}')
         if signal.semantic_kind is not port.semantic_kind:
             raise TemplateBindingError(f'{binding.instance_id}.{binding.port_name} has incompatible signal kind')
+        if binding.formal_name != port.resolved_formal_name(binding.index):
+            raise TemplateBindingError(f'{binding.instance_id}.{binding.port_name} has an unresolved formal name')
         key = (binding.instance_id, binding.port_name, binding.index)
         if key in seen:
             raise TemplateBindingError(f'duplicate port binding for {binding.instance_id}.{binding.port_name}[{binding.index}]')
@@ -648,6 +771,40 @@ def _validate_bindings(stages: tuple[BoundBodyStage, ...], wrappers: tuple[Bound
             count = counts.get((instance_id, port.name), 0)
             if count < port.minimum or (port.maximum is not None and count > port.maximum):
                 raise TemplateBindingError(f'{instance_id}.{port.name} has {count} bindings outside its contract')
+
+
+def _resolve_driver_ownership(signals: tuple[BoundLogicalSignal, ...],
+                              bindings: tuple[BoundPortBinding, ...],
+                              contracts: dict[str, TemplateContract],
+                              module_ports: tuple[BoundModulePort, ...]) -> tuple[BoundLogicalSignal, ...]:
+    """Record and validate every source before RTL emission.
+
+    A port may have many readers. A logical signal must have one source at
+    most; module outputs require exactly one source because this compiler has
+    no shared-channel mux or arbitration architecture yet.
+    """
+    drivers: dict[str, list[BoundSignalDriver]] = {signal.id: [] for signal in signals}
+    for signal in signals:
+        if signal.expression is not None or signal.enable is not None:
+            drivers[signal.id].append(BoundSignalDriver(SignalDriverKind.EXPRESSION, signal.id))
+    for port in module_ports:
+        if port.direction is PortDirection.INPUT:
+            drivers[port.signal_id].append(BoundSignalDriver(SignalDriverKind.MODULE_INPUT, port.name))
+    for item in bindings:
+        port = contracts[item.instance_id].port(item.port_name)
+        assert port is not None
+        if port.direction is PortDirection.OUTPUT:
+            drivers[item.signal_id].append(BoundSignalDriver(
+                SignalDriverKind.TEMPLATE_OUTPUT, f'{item.instance_id}.{item.formal_name}',
+            ))
+    for signal_id, sources in drivers.items():
+        if len(sources) > 1:
+            owners = ', '.join(source.owner for source in sources)
+            raise TemplateBindingError(f'signal {signal_id} has multiple drivers: {owners}')
+    for port in module_ports:
+        if port.direction is PortDirection.OUTPUT and len(drivers[port.signal_id]) != 1:
+            raise TemplateBindingError(f'module output {port.name} must have exactly one internal driver')
+    return tuple(replace(signal, drivers=tuple(drivers[signal.id])) for signal in signals)
 
 
 def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStructuralGraph:
@@ -687,16 +844,27 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
         enable=wrapper.enable,
         location=wrapper.location,
     ) for wrapper in graph.wrappers)
-    bindings = _Bindings()
+    contracts = {stage.id: stage.contract for stage in body_stages}
+    contracts.update({wrapper.id: wrapper.contract for wrapper in wrappers})
+    for stage in body_stages:
+        if stage.storage:
+            contracts[stage.storage.id] = stage.storage.contract
+        if stage.matched_delay:
+            contracts[stage.matched_delay.id] = stage.matched_delay.contract
+    bindings = _Bindings(contracts)
+    module_ports = _ModulePorts(bindings)
     handshakes = _handshake_signals(graph, bindings)
     _bind_stage_topology(graph, bindings, handshakes)
-    _bind_data_dependencies(graph, bindings)
-    _bind_unconditional_external_operations(graph, bindings)
-    _bind_wrapper_ports(graph, bindings)
-    _bind_storage_and_delays(body_stages, wrappers, bindings)
+    external_payloads = _bind_unconditional_external_operations(graph, bindings, module_ports)
+    wrapper_send_payloads = _bind_wrapper_ports(graph, bindings, module_ports,
+                                                {stage.id: stage for stage in body_stages})
+    _bind_storage_and_delays(body_stages, wrappers, bindings, external_payloads, wrapper_send_payloads)
     _validate_bindings(body_stages, wrappers, bindings)
+    resolved_signals = _resolve_driver_ownership(tuple(bindings.signals), tuple(bindings.bindings), contracts,
+                                                  tuple(module_ports.ports))
     dependencies = tuple(BoundStructuralDependency(
         edge.source_node, edge.target_node, edge.kind, edge.source_stage, edge.target_stage,
     ) for edge in graph.dependencies)
     return BoundStructuralGraph(graph.module, TEMPLATE_CONTRACTS, body_stages, wrappers, dependencies,
-                                graph.metadata, tuple(bindings.signals), tuple(bindings.bindings))
+                                graph.metadata, resolved_signals, tuple(bindings.bindings), graph.parameters,
+                                tuple(sorted(module_ports.ports, key=lambda port: port.name)))

@@ -50,6 +50,7 @@ class DependencyGraph:
     module: str
     nodes: tuple[DependencyNode, ...]
     edges: tuple[DependencyEdge, ...]
+    parameters: tuple[behavioral.Parameter, ...] = ()
 
     def nodes_for(self, operation: object) -> tuple[DependencyNode, ...]:
         """Return graph nodes that trace to an exact normalized IR object."""
@@ -291,7 +292,7 @@ class _Analyzer:
         flow = self.process(self.module.body, {})
         if self.wrappers:
             raise DependencyAnalysisError('normalized wrapper has no BODY counterpart')
-        return DependencyGraph(self.module.name, tuple(self.nodes), tuple(self.edges))
+        return DependencyGraph(self.module.name, tuple(self.nodes), tuple(self.edges), self.module.parameters)
 
 
 def analyze_dependencies(module: normalization.NormalizedModule) -> DependencyGraph:

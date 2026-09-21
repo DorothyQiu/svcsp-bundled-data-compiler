@@ -67,6 +67,7 @@ class PipelineGraph:
     metadata: tuple[PipelineMetadata, ...]
     dependencies: tuple[PipelineDependency, ...]
     attachments: tuple[WrapperAttachment, ...]
+    parameters: tuple[behavioral.Parameter, ...] = ()
 
     def stage_for(self, dependency_node: str) -> PipelineStage | None:
         for stage in self.stages:
@@ -141,4 +142,4 @@ def synthesize_pipeline(graph: dependency.DependencyGraph) -> PipelineGraph:
     mapped = tuple(PipelineDependency(edge.source, edge.target, edge.kind,
                                       stage_ids.get(edge.source), stage_ids.get(edge.target))
                    for edge in graph.edges)
-    return PipelineGraph(graph.module, tuple(stages), metadata, mapped, attachments)
+    return PipelineGraph(graph.module, tuple(stages), metadata, mapped, attachments, graph.parameters)
