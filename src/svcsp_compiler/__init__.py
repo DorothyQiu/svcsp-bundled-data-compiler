@@ -3,7 +3,8 @@
 from .frontend import FrontendError, parse_file, parse_text
 from .behavioral_ir import (
     Assign, BehavioralIRError, BehavioralModule, ChannelEndpoint, Expression, If,
-    Parallel, Receive, Send, Sequence, Skip, SourceLocation, Variable, lower_behavioral,
+    Parameter, Parallel, PayloadType, PayloadWidth, Receive, Send, Sequence, Skip, SourceLocation, Variable,
+    ONE_BIT, expression_payload_type, lower_behavioral, payload_types_compatible,
 )
 from .communication_normalization import (
     DummyToken, Enable, NormalizationError, NormalizedModule, NormalizedReceive,
@@ -22,11 +23,17 @@ from .microarchitecture_ir import (
     MicroarchitectureError, MicroarchitectureGraph, MicroarchitectureMetadata,
     MicroarchitectureStage, MicroarchitectureWrapper, StorageRequirement, select_microarchitecture,
 )
+from .template_binding import (
+    BoundBodyStage, BoundLogicalSignal, BoundMatchedDelay, BoundPortBinding, BoundStorage,
+    BoundStructuralDependency, BoundStructuralGraph, BoundWrapper, PortDirection, PortSemanticKind,
+    StructuralTemplate, TEMPLATE_CONTRACTS, TemplateBindingError, TemplateContract, TemplatePort,
+    bind_templates, template_contract,
+)
 
 __all__ = [
     "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
-    "FrontendError", "If", "Parallel", "Receive", "Send", "Sequence", "Skip",
-    "SourceLocation", "Variable",
+    "FrontendError", "If", "Parameter", "Parallel", "PayloadType", "PayloadWidth", "Receive", "Send", "Sequence", "Skip",
+    "SourceLocation", "Variable", "ONE_BIT", "expression_payload_type", "payload_types_compatible",
     "DummyToken", "Enable", "NormalizationError", "NormalizedModule",
     "NormalizedReceive", "NormalizedSend", "lower_behavioral",
     "normalize_communication", "parse_file", "parse_text",
@@ -37,4 +44,8 @@ __all__ = [
     "ControllerKind", "HandshakePort", "MatchedDelayRequirement", "MicroarchitectureDependency",
     "MicroarchitectureError", "MicroarchitectureGraph", "MicroarchitectureMetadata",
     "MicroarchitectureStage", "MicroarchitectureWrapper", "StorageRequirement", "select_microarchitecture",
+    "BoundBodyStage", "BoundLogicalSignal", "BoundMatchedDelay", "BoundPortBinding", "BoundStorage",
+    "BoundStructuralDependency", "BoundStructuralGraph", "BoundWrapper", "PortDirection", "PortSemanticKind",
+    "StructuralTemplate", "TEMPLATE_CONTRACTS", "TemplateBindingError", "TemplateContract", "TemplatePort",
+    "bind_templates", "template_contract",
 ]

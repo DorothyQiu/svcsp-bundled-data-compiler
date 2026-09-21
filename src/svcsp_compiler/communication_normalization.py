@@ -69,6 +69,7 @@ class NormalizedModule:
     body: behavioral.Process
     channels: tuple[behavioral.ChannelEndpoint, ...]
     variables: tuple[behavioral.Variable, ...]
+    parameters: tuple[behavioral.Parameter, ...]
     enables: tuple[Enable, ...]
     wrappers: tuple[Wrapper, ...]
     location: behavioral.SourceLocation | None = None
@@ -139,6 +140,7 @@ def normalize_communication(module: behavioral.BehavioralModule) -> NormalizedMo
         body=normalizer.process(module.body),
         channels=module.channels,
         variables=module.variables,
+        parameters=module.parameters,
         enables=tuple(normalizer.enables),
         wrappers=tuple(normalizer.wrappers),
         location=module.location,

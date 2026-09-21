@@ -6,6 +6,7 @@ All results are JSON-compatible dictionaries; syntax retains pyslang kind names.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from pyslang import DiagnosticEngine, SourceManager
@@ -86,6 +87,95 @@ def _fail(node, message):
     raise FrontendError(f"{loc['file']}:{loc['line']}:{loc['column']}: {message}")
 
 
+def _dimension_expression(expr, parameters=None):
+    """Render a supported declaration-bound expression without evaluating it."""
+    kind = expr['kind']
+    if kind not in _SUPPORTED_EXPRESSION_KINDS:
+        _fail(expr, f'unsupported data expression: {kind}')
+    if kind in {'IntegerLiteralExpression', 'IntegerVectorExpression'}:
+        return expr.get('literal', expr.get('size', '') + expr.get('base', '') + expr.get('value', ''))
+    if kind in {'IdentifierName', 'IdentifierSelectName'} and not expr.get('selectors'):
+        if parameters is not None and expr['identifier'] not in parameters:
+            _fail(expr, f'undeclared symbolic width parameter: {expr["identifier"]}')
+        return expr['identifier']
+    if 'left' in expr and 'right' in expr:
+        return f'({_dimension_expression(expr["left"], parameters)} {expr.get("operatorToken", "?")} ' \
+               f'{_dimension_expression(expr["right"], parameters)})'
+    if 'operand' in expr:
+        return f'({expr.get("operatorToken", "?")}{_dimension_expression(expr["operand"], parameters)})'
+    _fail(expr, f'unsupported data expression: {kind}')
+
+
+def _integer(text):
+    return int(text) if re.fullmatch(r'-?[0-9]+', text) else None
+
+
+def _width_parameters(expr, parameters):
+    names = []
+    for node in walk(expr):
+        if node['kind'] in {'IdentifierName', 'IdentifierSelectName'}:
+            name = node['identifier']
+            if name not in parameters:
+                _fail(node, f'undeclared symbolic width parameter: {name}')
+            if name not in names:
+                names.append(name)
+    return [parameters[name] for name in names]
+
+
+def _symbolic_range_width(left, right):
+    """Recognize the common [W-1:0] spelling as the width identity W."""
+    compact_left, compact_right = left.replace(' ', '').strip('()'), right.replace(' ', '')
+    match = re.fullmatch(r'([A-Za-z_$][A-Za-z0-9_$]*)-1', compact_left)
+    if compact_right == '0' and match:
+        return match.group(1)
+    return f'{left}:{right}'
+
+
+def _payload_type(dtype, parameters):
+    """Extract supported packed data metadata as JSON-compatible symbolic data."""
+    dimensions = dtype.get('dimensions', [])
+    if not dimensions:
+        return {'base': dtype['keyword'], 'width': {'bits': 1, 'symbolic': None}, 'packed_range': None}
+    if len(dimensions) != 1:
+        _fail(dtype, 'only one packed dimension is supported for payload widths')
+    specifier = dimensions[0].get('specifier', {})
+    selector = specifier.get('selector', {})
+    if selector.get('kind') != 'SimpleRangeSelect':
+        _fail(dimensions[0], 'expected a packed range dimension')
+    left = _dimension_expression(selector['left'], parameters)
+    right = _dimension_expression(selector['right'], parameters)
+    left_value, right_value = _integer(left), _integer(right)
+    bits = abs(left_value - right_value) + 1 if left_value is not None and right_value is not None else None
+    return {
+        'base': dtype['keyword'],
+        'width': {'bits': bits, 'symbolic': None if bits is not None else _symbolic_range_width(left, right),
+                  'parameters': [] if bits is not None else
+                  _width_parameters(selector['left'], parameters) +
+                  [parameter for parameter in _width_parameters(selector['right'], parameters)
+                   if parameter['name'] not in {item['name'] for item in _width_parameters(selector['left'], parameters)}]},
+        'packed_range': {'left': left, 'right': right},
+    }
+
+
+def _channel_payload_type(dtype, parameter_values):
+    """Extract an optional single symbolic payload-width parameter from Channel #(W)."""
+    if dtype.get('kind') != 'NamedType':
+        return None
+    name = dtype.get('name', {})
+    parameter_list = name.get('parameters') if name.get('kind') == 'ClassName' else None
+    if not parameter_list:
+        return None
+    values = parameter_list.get('parameters', [])
+    if len(values) != 1 or values[0].get('kind') != 'OrderedParamAssignment':
+        _fail(parameter_list, 'channel payload type requires one positional width parameter')
+    symbolic = _dimension_expression(values[0]['expr'], parameter_values)
+    bits = _integer(symbolic)
+    return {'base': name['identifier'], 'width': {'bits': bits, 'symbolic': None if bits is not None else symbolic,
+                                                   'parameters': [] if bits is not None else
+                                                   _width_parameters(values[0]['expr'], parameter_values)},
+            'packed_range': None}
+
+
 def _extract(tree, channel_types):
     root = _syntax(tree)
     members = root.get('members', []) if root['kind'] == 'CompilationUnit' else [root]
@@ -93,8 +183,26 @@ def _extract(tree, channel_types):
         _fail(root, 'expected exactly one module')
     module = members[0]
     header = module['header']
-    if header.get('parameters') or header.get('imports'):
-        _fail(header, 'parameterized modules and header imports are not supported')
+    if header.get('imports'):
+        _fail(header, 'header imports are not supported')
+    parameters = {}
+    parameter_list = header.get('parameters')
+    if parameter_list:
+        for declaration in parameter_list.get('declarations', []):
+            if (declaration.get('kind') != 'ParameterDeclaration' or declaration.get('keyword') != 'parameter'
+                    or declaration.get('type', {}).get('kind') != 'IntType'):
+                _fail(declaration, 'only parameter int declarations are supported for symbolic widths')
+            for declarator in declaration.get('declarators', []):
+                name = declarator['name']
+                if name in parameters:
+                    _fail(declarator, f'duplicate parameter declaration: {name}')
+                initializer = declarator.get('initializer')
+                parameters[name] = {
+                    'name': name,
+                    'module': header['name'],
+                    'default': _dimension_expression(initializer['expr']) if initializer else None,
+                    'location': declarator['location'],
+                }
     channels, variables, operations = [], [], []
     symbols = {}
     types = set(channel_types)
@@ -136,6 +244,7 @@ def _extract(tree, channel_types):
             declare(name, 'channel', decl, symbols)
             channels.append({'name': name, 'type': inherited[0], 'modport': inherited[1],
                              'dimensions': decl.get('dimensions', []), 'direction': 'unknown',
+                             'payload_type': _channel_payload_type(dtype, parameters),
                              'location': decl['location'], 'operations': []})
     endpoints = {c['name']: c for c in channels}
 
@@ -146,7 +255,7 @@ def _extract(tree, channel_types):
                 _fail(node, f'unsupported data expression: {kind}')
             if kind in {'IdentifierName', 'IdentifierSelectName'}:
                 name = node['identifier']
-                if scope.get(name) != 'variable':
+                if scope.get(name) != 'variable' and name not in parameters:
                     _fail(node, f'expected a declared local variable: {name}')
 
     def target(expr, scope):
@@ -160,8 +269,7 @@ def _extract(tree, channel_types):
         dtype = declaration['type']
         if dtype['kind'] not in {'LogicType', 'RegType', 'BitType'} or declaration.get('modifiers'):
             _fail(declaration, 'only unqualified logic/reg/bit variables are supported')
-        for dimension in dtype.get('dimensions', []):
-            expression(dimension, scope)
+        payload_type = _payload_type(dtype, parameters)
         for decl in declaration['declarators']:
             name = decl['name']
             declare(name, 'variable', decl, scope)
@@ -170,7 +278,7 @@ def _extract(tree, channel_types):
             initializer = decl.get('initializer')
             if initializer:
                 expression(initializer['expr'], scope)
-            variables.append({'name': name, 'type': dtype, 'scope': list(path),
+            variables.append({'name': name, 'type': dtype, 'payload_type': payload_type, 'scope': list(path),
                               'dimensions': decl.get('dimensions', []),
                               'initializer': initializer, 'location': decl['location']})
 
@@ -260,7 +368,8 @@ def _extract(tree, channel_types):
     for channel in channels:
         roles = {'input' if op['method'] == 'Receive' else 'output' for op in channel['operations']}
         channel['direction'] = 'bidirectional' if len(roles) == 2 else next(iter(roles), 'unknown')
-    return {'module': header['name'], 'location': module['location'], 'variables': variables,
+    return {'module': header['name'], 'location': module['location'], 'parameters': list(parameters.values()),
+            'variables': variables,
             'channels': channels, 'operations': operations, 'always': process, 'syntax': module,
             'warnings': DiagnosticEngine.reportAll(tree.sourceManager, tree.diagnostics)}
 
