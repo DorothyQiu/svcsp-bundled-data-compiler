@@ -1,7 +1,10 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
+
+import pytest
 
 from svcsp_compiler import (
-    DependencyKind, StageKind, analyze_dependencies, lower_behavioral,
+    CommunicationSite, DependencyEdge, DependencyKind, NodeKind, PipelineSynthesisError, StageKind,
+    analyze_dependencies, lower_behavioral,
     normalize_communication, parse_text, synthesize_pipeline,
 )
 
@@ -75,7 +78,9 @@ if (c) A.Receive(x); endmodule''')
     attachment = graph.attachments[0]
     assert attachment.direction == 'into_body'
     assert graph.stage_for(attachment.wrapper_node) is None
-    assert stage(graph, 'skip').id == attachment.body_stage
+    body = graph.stage_for(next(node.id for item in graph.stages for node in item.operations
+                                if isinstance(node.operation, CommunicationSite)))
+    assert body is not None and body.id == attachment.body_stage
 
 
 def test_conditional_send_wrapper_attaches_to_body_stage():
@@ -83,7 +88,33 @@ def test_conditional_send_wrapper_attaches_to_body_stage():
 if (c) A.Send(x); endmodule''')
     attachment = graph.attachments[0]
     assert attachment.direction == 'from_body'
-    assert stage(graph, 'skip').id == attachment.body_stage
+    body = next(item for item in graph.stages
+                if isinstance(item.operations[0].operation, CommunicationSite))
+    assert body.id == attachment.body_stage
+
+
+def test_wrapper_attachment_rejects_wrong_communication_direction():
+    behavioral = lower_behavioral(parse_text('''module m(interface A); logic c, x; always
+if (c) A.Receive(x); endmodule''', 'attachment.sv'))
+    dependencies = analyze_dependencies(normalize_communication(behavioral))
+    reversed_edges = tuple(
+        DependencyEdge(edge.target, edge.source, edge.kind)
+        if edge.kind is DependencyKind.COMMUNICATION else edge
+        for edge in dependencies.edges
+    )
+    with pytest.raises(PipelineSynthesisError, match='invalid BODY communication direction'):
+        synthesize_pipeline(replace(dependencies, edges=reversed_edges))
+
+
+def test_wrapper_attachment_rejects_duplicate_site_operation_node():
+    behavioral = lower_behavioral(parse_text('''module m(interface A); logic c, x; always
+if (c) A.Send(x); endmodule''', 'attachment.sv'))
+    dependencies = analyze_dependencies(normalize_communication(behavioral))
+    site_node = next(node for node in dependencies.nodes
+                     if node.kind is NodeKind.OPERATION and isinstance(node.operation, CommunicationSite))
+    duplicate = replace(site_node, id='duplicate_site_node')
+    with pytest.raises(PipelineSynthesisError, match='exactly one operation node'):
+        synthesize_pipeline(replace(dependencies, nodes=dependencies.nodes + (duplicate,)))
 
 
 def test_selected_channel_endpoints_remain_distinct_in_attachments():

@@ -7,9 +7,11 @@ from .behavioral_ir import (
     ONE_BIT, expression_payload_type, lower_behavioral, payload_types_compatible,
 )
 from .communication_normalization import (
-    DummyToken, Enable, NormalizationError, NormalizedModule, NormalizedReceive,
-    NormalizedSend, normalize_communication,
+    BodyChannel, BodyChannelDirection, BodyCommunication, BodyReceive, BodySend,
+    CommunicationSite, DummyToken, Enable, NormalizationError, NormalizedModule,
+    NormalizedProcess, NormalizedReceive, NormalizedSend, normalize_communication,
 )
+from .decomposed_svcsp import DecomposedSVCSPError, emit_conditional_send_decomposition
 from .dependency_analysis import (
     DependencyAnalysisError, DependencyEdge, DependencyGraph, DependencyKind,
     DependencyNode, NodeKind, analyze_dependencies,
@@ -38,9 +40,11 @@ __all__ = [
     "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
     "FrontendError", "If", "Parameter", "Parallel", "PayloadType", "PayloadWidth", "Receive", "Send", "Sequence", "Skip",
     "SourceLocation", "Variable", "ONE_BIT", "expression_payload_type", "payload_types_compatible",
-    "DummyToken", "Enable", "NormalizationError", "NormalizedModule",
+    "BodyChannel", "BodyChannelDirection", "BodyCommunication", "BodyReceive", "BodySend",
+    "CommunicationSite", "DummyToken", "Enable", "NormalizationError", "NormalizedModule", "NormalizedProcess",
     "NormalizedReceive", "NormalizedSend", "lower_behavioral",
     "normalize_communication", "parse_file", "parse_text",
+    "DecomposedSVCSPError", "emit_conditional_send_decomposition",
     "DependencyAnalysisError", "DependencyEdge", "DependencyGraph", "DependencyKind",
     "DependencyNode", "NodeKind", "analyze_dependencies",
     "PipelineDependency", "PipelineGraph", "PipelineMetadata", "PipelineStage", "PipelineSynthesisError",

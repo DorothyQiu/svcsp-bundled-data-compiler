@@ -126,11 +126,20 @@ class _Analyzer:
         self.edges: list[DependencyEdge] = []
         self._edge_keys: set[tuple[str, str, DependencyKind]] = set()
         self._next_id = 0
-        self.wrappers = {
-            (wrapper.location.file, wrapper.location.line, wrapper.location.column): wrapper
-            for wrapper in module.wrappers
-            if wrapper.location is not None
-        }
+        self.wrappers_by_site: dict[normalization.CommunicationSite, normalization.Wrapper] = {}
+        self.body_communications_by_site: dict[
+            normalization.CommunicationSite, normalization.BodyCommunication,
+        ] = {}
+        for wrapper in module.wrappers:
+            if wrapper.site in self.wrappers_by_site:
+                raise DependencyAnalysisError(f'duplicate wrapper for communication site {wrapper.site.id}')
+            self.wrappers_by_site[wrapper.site] = wrapper
+        for communication in module.body_communications:
+            if communication.site in self.body_communications_by_site:
+                raise DependencyAnalysisError(f'duplicate BODY communication for site {communication.site.id}')
+            self.body_communications_by_site[communication.site] = communication
+        if set(self.wrappers_by_site) != set(self.body_communications_by_site):
+            raise DependencyAnalysisError('normalized wrapper and BODY communication sites do not match')
         self.conditional_receive_guards: dict[behavioral.Variable, set[Guard]] = {}
         for wrapper in module.wrappers:
             if isinstance(wrapper, normalization.NormalizedReceive):
@@ -174,16 +183,16 @@ class _Analyzer:
                     )
                 self.edge(definition.node, target, DependencyKind.DATA)
 
-    def wrapper_for(self, process: behavioral.Skip) -> normalization.Wrapper | None:
-        location = process.location
-        if location is None:
-            return None
-        return self.wrappers.pop((location.file, location.line, location.column), None)
-
-    def wrapper_flow(self, skip: behavioral.Skip, wrapper: normalization.Wrapper,
+    def wrapper_flow(self, site: normalization.CommunicationSite,
+                     communication: normalization.BodyCommunication,
+                     wrapper: normalization.Wrapper,
                      definitions: dict[behavioral.Variable, set[ReachingDefinition]], controls: set[str],
                      current_guard: Guard) -> _Flow:
-        skip_id = self.node(NodeKind.OPERATION, 'skip', operation=skip, location=skip.location)
+        if (communication.site is not site or wrapper.site is not site or
+                communication.channel is not wrapper.body_channel or
+                communication.enable is not wrapper.enable):
+            raise DependencyAnalysisError(f'communication site {site.id} has inconsistent shared identities')
+        skip_id = self.node(NodeKind.OPERATION, 'skip', operation=site, location=site.location)
         enable_id = self.node(NodeKind.ENABLE, 'enable', operation=wrapper.enable,
                               enable=wrapper.enable, location=wrapper.enable.location)
         self.read(_variables(wrapper.enable.condition), definitions, enable_id, current_guard)
@@ -196,22 +205,35 @@ class _Analyzer:
         self.edge(enable_id, wrapper_id, DependencyKind.CONTROL)
         updated = {variable: set(nodes) for variable, nodes in definitions.items()}
         if isinstance(wrapper, normalization.NormalizedReceive):
+            if not isinstance(communication, normalization.BodyReceive):
+                raise DependencyAnalysisError(f'communication site {site.id} has receive wrapper/body mismatch')
+            if (communication.target is not wrapper.target or
+                    communication.disabled_token is not wrapper.disabled_token or
+                    communication.data_valid_when is not wrapper.enable):
+                raise DependencyAnalysisError(f'communication site {site.id} has inconsistent receive semantics')
             self.edge(wrapper_id, skip_id, DependencyKind.COMMUNICATION)
-            target = _target_variable(wrapper.target)
+            target = _target_variable(communication.target)
             if target:
                 updated[target] = {ReachingDefinition(wrapper_id, _guard_for(wrapper.enable.condition))}
             return _Flow({wrapper_id}, {skip_id}, updated)
-        self.read(_variables(wrapper.value), definitions, wrapper_id, current_guard)
+        if not isinstance(communication, normalization.BodySend):
+            raise DependencyAnalysisError(f'communication site {site.id} has send wrapper/body mismatch')
+        if communication.value is not wrapper.value or communication.payload_valid_when is not wrapper.enable:
+            raise DependencyAnalysisError(f'communication site {site.id} has inconsistent send semantics')
+        self.read(_variables(communication.value), definitions, wrapper_id, current_guard)
         self.edge(skip_id, wrapper_id, DependencyKind.COMMUNICATION)
         return _Flow({skip_id}, {wrapper_id}, updated)
 
-    def leaf(self, process: behavioral.Process,
+    def leaf(self, process: normalization.NormalizedProcess,
              definitions: dict[behavioral.Variable, set[ReachingDefinition]], controls: set[str],
              current_guard: Guard) -> _Flow:
+        if isinstance(process, normalization.CommunicationSite):
+            wrapper = self.wrappers_by_site.get(process)
+            communication = self.body_communications_by_site.get(process)
+            if wrapper is None or communication is None:
+                raise DependencyAnalysisError(f'communication site {process.id} has no wrapper/body communication')
+            return self.wrapper_flow(process, communication, wrapper, definitions, controls, current_guard)
         if isinstance(process, behavioral.Skip):
-            wrapper = self.wrapper_for(process)
-            if wrapper:
-                return self.wrapper_flow(process, wrapper, definitions, controls, current_guard)
             node_id = self.node(NodeKind.OPERATION, 'skip', operation=process, location=process.location)
             return _Flow({node_id}, {node_id}, definitions)
         if isinstance(process, behavioral.Receive):
@@ -246,7 +268,7 @@ class _Analyzer:
                 merged.setdefault(variable, set()).update(definitions)
         return merged
 
-    def process(self, process: behavioral.Process,
+    def process(self, process: normalization.NormalizedProcess,
                 definitions: dict[behavioral.Variable, set[ReachingDefinition]], controls: set[str] | None = None,
                 current_guard: Guard = frozenset()) -> _Flow:
         controls = controls or set()
@@ -289,9 +311,7 @@ class _Analyzer:
         return self.leaf(process, definitions, controls, current_guard)
 
     def run(self) -> DependencyGraph:
-        flow = self.process(self.module.body, {})
-        if self.wrappers:
-            raise DependencyAnalysisError('normalized wrapper has no BODY counterpart')
+        self.process(self.module.body, {})
         return DependencyGraph(self.module.name, tuple(self.nodes), tuple(self.edges), self.module.parameters)
 
 

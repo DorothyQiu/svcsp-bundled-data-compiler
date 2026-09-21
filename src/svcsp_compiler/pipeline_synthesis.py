@@ -95,19 +95,28 @@ def _attachment(graph: dependency.DependencyGraph, wrapper: dependency.Dependenc
     operation = wrapper.operation
     if not isinstance(operation, (normalization.NormalizedReceive, normalization.NormalizedSend)):
         raise PipelineSynthesisError(f'wrapper node {wrapper.id} has no normalized communication object')
-    body_nodes = []
-    for edge in dependencies:
-        if edge.kind is not dependency.DependencyKind.COMMUNICATION:
-            continue
-        if edge.source == wrapper.id and edge.target in stage_ids:
-            body_nodes.append(edge.target)
-        if edge.target == wrapper.id and edge.source in stage_ids:
-            body_nodes.append(edge.source)
-    if len(body_nodes) != 1:
-        raise PipelineSynthesisError(f'wrapper node {wrapper.id} must have exactly one BODY-side stage')
+    site_nodes = [node for node in graph.nodes
+                  if node.kind is dependency.NodeKind.OPERATION and node.operation is operation.site]
+    if len(site_nodes) != 1:
+        raise PipelineSynthesisError(
+            f'wrapper node {wrapper.id} must have exactly one operation node for site {operation.site.id}')
+    site_node = site_nodes[0]
+    if site_node.id not in stage_ids:
+        raise PipelineSynthesisError(f'wrapper node {wrapper.id} has no stage for site {operation.site.id}')
+    expected_source, expected_target = (
+        (wrapper.id, site_node.id) if isinstance(operation, normalization.NormalizedReceive)
+        else (site_node.id, wrapper.id)
+    )
+    communication_edges = [edge for edge in dependencies
+                           if edge.kind is dependency.DependencyKind.COMMUNICATION and
+                           (edge.source == wrapper.id or edge.target == wrapper.id)]
+    if len(communication_edges) != 1 or (
+            communication_edges[0].source, communication_edges[0].target) != (expected_source, expected_target):
+        raise PipelineSynthesisError(
+            f'wrapper node {wrapper.id} has an invalid BODY communication direction')
     return WrapperAttachment(
         wrapper_node=wrapper.id,
-        body_stage=stage_ids[body_nodes[0]],
+        body_stage=stage_ids[site_node.id],
         endpoint=operation.endpoint,
         enable=operation.enable,
         direction='into_body' if isinstance(operation, normalization.NormalizedReceive) else 'from_body',

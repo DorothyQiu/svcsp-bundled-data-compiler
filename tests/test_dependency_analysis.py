@@ -1,10 +1,10 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
 from svcsp_compiler import (
     DependencyAnalysisError,
-    DependencyKind, NodeKind, analyze_dependencies, lower_behavioral,
+    DependencyKind, NodeKind, SourceLocation, analyze_dependencies, lower_behavioral,
     normalize_communication, parse_text,
 )
 
@@ -76,23 +76,39 @@ if (a) if (b) A.Send(x); endmodule''')
 
 
 def test_conditional_receive_has_enable_wrapper_and_body_dependencies():
-    graph = analyze('''module m(interface A); logic c, x; always
-if (c) A.Receive(x); endmodule''')
+    normalized = normalize_communication(lower_behavioral(parse_text('''module m(interface A); logic c, x; always
+if (c) A.Receive(x); endmodule''', 'identity.sv')))
+    # The wrapper location deliberately differs from the BODY site.  The
+    # identity link, not a source-location lookup, must drive Phase 4.
+    wrapper_ir = replace(normalized.wrappers[0], location=SourceLocation('moved.sv', 99, 1))
+    normalized = replace(normalized, wrappers=(wrapper_ir,))
+    graph = analyze_dependencies(normalized)
     enable = node(graph, 'enable')
     wrapper = node(graph, 'normalized_receive')
     skip = node(graph, 'skip')
     assert (enable.id, wrapper.id) in edges(graph, DependencyKind.CONTROL)
     assert (wrapper.id, skip.id) in edges(graph, DependencyKind.COMMUNICATION)
+    assert skip.operation is normalized.communication_sites[0]
+    assert wrapper.operation is wrapper_ir
+    assert wrapper.operation.site is skip.operation
+    assert wrapper.operation.body_channel is normalized.body_channels[0]
+    assert normalized.body_communications[0].channel is wrapper.operation.body_channel
+    assert normalized.body_communications[0].disabled_token is wrapper.operation.disabled_token
 
 
 def test_conditional_send_has_body_wrapper_and_enable_dependencies():
-    graph = analyze('''module m(interface A); logic c, x; always
-if (c) A.Send(x); endmodule''')
+    normalized = normalize_communication(lower_behavioral(parse_text('''module m(interface A); logic c, x; always
+if (c) A.Send(x); endmodule''', 'send_identity.sv')))
+    graph = analyze_dependencies(normalized)
     enable = node(graph, 'enable')
     wrapper = node(graph, 'normalized_send')
     skip = node(graph, 'skip')
     assert (enable.id, wrapper.id) in edges(graph, DependencyKind.CONTROL)
     assert (skip.id, wrapper.id) in edges(graph, DependencyKind.COMMUNICATION)
+    assert skip.operation is normalized.communication_sites[0]
+    assert wrapper.operation.site is skip.operation
+    assert normalized.body_communications[0].channel is wrapper.operation.body_channel
+    assert normalized.body_communications[0].payload_valid_when is wrapper.operation.enable
 
 
 def test_selected_endpoints_remain_distinct_in_graph_nodes():

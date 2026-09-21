@@ -1,7 +1,8 @@
 from dataclasses import asdict
 
 from svcsp_compiler import (
-    Assign, DummyToken, If, NormalizedReceive, NormalizedSend, Receive, Send,
+    Assign, BodyChannelDirection, BodyReceive, BodySend, CommunicationSite, DummyToken, If,
+    NormalizedReceive, NormalizedSend, Receive, Send,
     Sequence, Skip, lower_behavioral, normalize_communication, parse_text,
 )
 
@@ -33,7 +34,7 @@ def test_unconditional_send_passes_through():
 def test_conditional_receive_becomes_receive_wrapper_with_dummy_token():
     ir = normalize('''module m(interface A); logic c, x; always
 if (c) A.Receive(x); else x = c; endmodule''')
-    assert isinstance(ir.body, If) and isinstance(ir.body.then_branch, Skip)
+    assert isinstance(ir.body, If) and type(ir.body.then_branch) is CommunicationSite
     wrapper = ir.wrappers[0]
     assert isinstance(wrapper, NormalizedReceive)
     assert wrapper.enable.condition.value == 'c'
@@ -43,18 +44,34 @@ if (c) A.Receive(x); else x = c; endmodule''')
     assert wrapper.forwards_real_data_when_enabled is True
     assert wrapper.acknowledges_external_when_disabled is False
     assert wrapper.provides_body_token_when_disabled is True
+    body_receive = ir.body_communications[0]
+    assert isinstance(body_receive, BodyReceive)
+    assert body_receive.site is ir.body.then_branch is wrapper.site
+    assert body_receive.channel is wrapper.body_channel is ir.body_channels[0]
+    assert body_receive.enable is wrapper.enable
+    assert body_receive.data_valid_when is wrapper.enable
+    assert body_receive.disabled_token is wrapper.disabled_token
+    assert body_receive.channel.direction is BodyChannelDirection.INTO_BODY
 
 
 def test_conditional_send_becomes_send_wrapper_that_consumes_body_token():
     ir = normalize('''module m(interface A); logic c, x; always
 if (c) A.Send(x); else x = c; endmodule''')
-    assert isinstance(ir.body, If) and isinstance(ir.body.then_branch, Skip)
+    assert isinstance(ir.body, If) and type(ir.body.then_branch) is CommunicationSite
     wrapper = ir.wrappers[0]
     assert isinstance(wrapper, NormalizedSend)
     assert wrapper.enable.condition.value == 'c'
     assert wrapper.consumes_body_token_always is True
     assert wrapper.communicates_externally_when_enabled is True
     assert wrapper.communicates_externally_when_disabled is False
+    body_send = ir.body_communications[0]
+    assert isinstance(body_send, BodySend)
+    assert body_send.site is ir.body.then_branch is wrapper.site
+    assert body_send.channel is wrapper.body_channel is ir.body_channels[0]
+    assert body_send.enable is wrapper.enable
+    assert body_send.payload_valid_when is wrapper.enable
+    assert body_send.value is wrapper.value
+    assert body_send.channel.direction is BodyChannelDirection.FROM_BODY
 
 
 def test_if_else_communications_get_distinct_enables():
@@ -67,7 +84,8 @@ if (c) A.Send(x); else B.Receive(x); endmodule''')
     assert then_wrapper.enable.name != else_wrapper.enable.name
     assert then_wrapper.enable.condition.value == 'c'
     assert else_wrapper.enable.condition.operator == '!'
-    assert isinstance(ir.body.then_branch, Skip) and isinstance(ir.body.else_branch, Skip)
+    assert type(ir.body.then_branch) is CommunicationSite
+    assert type(ir.body.else_branch) is CommunicationSite
 
 
 def test_nested_conditionals_combine_enable_guards():
@@ -96,6 +114,8 @@ if (c) A.Send(x); if (c) A.Send(x); end endmodule''')
     assert len(ir.wrappers) == 2
     assert {wrapper.enable.occurrence for wrapper in ir.wrappers} == {0, 1}
     assert ir.wrappers[0].endpoint == ir.wrappers[1].endpoint
+    assert [communication.site for communication in ir.body_communications] == list(ir.communication_sites)
+    assert [communication.channel for communication in ir.body_communications] == list(ir.body_channels)
 
 
 def test_wrapper_preserves_variable_and_channel_identity():
