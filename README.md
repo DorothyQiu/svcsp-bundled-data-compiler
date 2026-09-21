@@ -19,7 +19,7 @@ syntax-independent IRs and metadata:
 | --- | --- | --- |
 | 1 | Frontend and semantic extraction | Parses the supported SVCSP subset with `pyslang`; extracts declarations, channels, operations, lexical scope, widths, control structure, and source locations. |
 | 2 | Behavioral CSP IR | Lowers to `Sequence`, `Parallel`, `If`, `Send`, `Receive`, `Assign`, and `Skip` without pyslang objects. |
-| 3 | Communication normalization | Represents conditional communication with distinct enables and normalized Send/Receive wrappers. |
+| 3 | Communication normalization | Represents each conditional occurrence with `CommunicationSite`, symbolic `Enable`, explicit `BodyChannel` and unconditional `BodySend`/`BodyReceive`, plus normalized Send/Receive wrapper semantics. |
 | 4 | Dependency analysis | Builds DATA, SEQUENCE, CONTROL, COMMUNICATION, and PARALLEL_JOIN edges, including conservative conditional-receive validity checks. |
 | 5 | Pipeline synthesis | Forms pipeline stages and retains dependency, wrapper, and boundary metadata. The linear transaction form is grouped into one BODY stage. |
 | 6 | Microarchitecture IR | Selects abstract LINEAR, JOIN, CONDITIONAL_SEND, and CONDITIONAL_RECV controller kinds, symbolic storage intent, and symbolic matched-delay intent. |
@@ -27,9 +27,18 @@ syntax-independent IRs and metadata:
 | 7B | Structural RTL emission | Mechanically emits deterministic SystemVerilog from the bound graph. It does not select controllers, storage, delays, widths, or wiring. |
 
 The full IR pipeline supports more structure than the current executable RTL
-library. In particular, JOIN and conditional communication are represented and
-tested in compiler IRs, but they are **not** supported by the end-to-end RTL
-MVP.
+library. JOIN and conditional communication are represented in compiler IRs,
+but they are **not** supported by the current end-to-end bundled-data RTL MVP.
+
+Conditional communication also has a Phase-3 verification/output branch. The
+same `NormalizedModule` can emit decomposed Channel-based SVCSP containing BODY
+plus SEND/RECV wrappers. This decomposed SVCSP is not a second IR and is never
+reparsed into the compiler backend.
+
+Direct single-site conditional Send and Receive decompositions are validated
+against the original SVCSP by behavioral simulation. Conditional Send emission
+uses a wrapper-to-BODY completion Channel so BODY continuation preserves the
+blocking semantics of the original external `Send`.
 
 ## Linear end-to-end MVP
 
@@ -205,6 +214,7 @@ python -m pytest -q tests/test_frontend.py
 python -m pytest -q tests/test_behavioral_ir.py
 python -m pytest -q tests/test_communication_normalization.py
 python -m pytest -q tests/test_dependency_analysis.py
+python -m pytest -q tests/test_decomposed_svcsp.py
 python -m pytest -q tests/test_pipeline_synthesis.py
 python -m pytest -q tests/test_microarchitecture_ir.py
 python -m pytest -q tests/test_template_binding.py
@@ -234,7 +244,8 @@ available.
 | Direct/trivial forwarding timing | Grouped by the linear compiler | Not yet end-to-end timing validated |
 | Exact concrete and parameter-owned symbolic payload widths | Yes | Yes |
 | Mechanical structural SystemVerilog emission | Yes | Yes, for the selected linear templates |
-| Conditional Receive/Send normalization | Yes | No |
+| Conditional Receive/Send normalization | Yes; explicit site, enable, BODY channel, BODY communication, and wrapper identities | No |
+| Decomposed SVCSP verification view | Yes; direct single-site Send/Receive behaviorally equivalence-tested | Separate verification output, not bundled-data RTL |
 | Conditional communication wrapper templates | Bound and emitted structurally | No RTL-library implementation |
 | Fork/join and JOIN topology | Represented and analyzed | No |
 | Shared channels, arbitration, muxing | Rejected where ownership is ambiguous | No |
@@ -243,13 +254,35 @@ available.
 
 ## Limitations and roadmap
 
+Conditional communication decomposition is implemented for one direct
+conditional communication site. Both conditional Send and conditional Receive
+have original-vs-decomposed behavioral-equivalence tests.
+
+For conditional Send, the emitted SEND wrapper returns a completion token only
+after an enabled external blocking `Send` completes; the disabled path returns
+completion without performing external communication. This preserves source
+ordering for later BODY operations.
+
+For conditional Receive, the disabled wrapper does not consume or acknowledge
+the external channel but still sends a dummy/invalid BODY-side token so the
+unconditional BODY Receive can progress.
+
+Production decomposed SVCSP remains Channel-based. Icarus Verilog 12 cannot use
+these Channel interfaces as useful module ports, so equivalence tests apply the
+same test-only mechanical Channel-to-payload/request/acknowledge lowering to
+both original and decomposed sources. This lowering is not compiler output.
+
+Current decomposed-emitter limitations intentionally fail closed for multiple
+conditional sites, repeated conditional operations on one endpoint, nested
+conditional sites, and conditional communication inside fork/join.
+
 The immediate roadmap is to extend the RTL library and verification only after
 the corresponding bound-template contracts and microarchitecture decisions are
 established. Planned work includes:
 
-1. Conditional source decomposition: `TOP -> TOP_BODY + SEND/RECV wrappers ->
-   TOP_DECOMPOSED`, followed by original-vs-decomposed behavioral equivalence
-   testing.
+1. Extend decomposed-SVCSP emission beyond the current direct single-site
+   support while preserving source ordering and blocking communication
+   semantics.
 2. JOIN controller and synchronization template implementation.
 3. Conditional Send/Receive wrapper RTL templates and end-to-end validation.
 4. Explicit shared-channel arbitration or mux architecture.

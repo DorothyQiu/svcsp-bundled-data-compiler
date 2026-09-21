@@ -1,23 +1,76 @@
 # Communication Normalization IR
 
 Phase 3 transforms a `BehavioralModule` with
-`normalize_communication(module)` into a separate `NormalizedModule`. The
-normalized BODY reuses immutable Behavioral CSP nodes: unconditional `Send` and
-`Receive` pass through unchanged, while each conditional external communication
-is replaced by `Skip` and recorded as a dedicated wrapper.
+`normalize_communication(module)` into a separate `NormalizedModule`.
 
-Each wrapper has a unique symbolic `Enable(name, occurrence, condition)`. An
-enable is an IR identity and symbolic expression, not an RTL signal or channel.
-Nested conditions are combined symbolically with `&&` and `!`.
+Ordinary unconditional `Send` and `Receive` operations remain behavioral
+operations.
 
-`NormalizedReceive` records that it consumes externally only when enabled. Its
-`DummyToken(data_is_valid=False)` represents the disabled path: no external
-token is consumed or acknowledged, while an internal BODY-side token is made
-available. `NormalizedSend` records that it consumes its BODY-side token on
-every iteration, communicates externally only when enabled, and suppresses the
-external communication when disabled.
+Each conditional communication occurrence is represented explicitly by:
 
-The pass does not prove that a BODY computation ignores disabled receive data;
-the dummy token explicitly marks that data as invalid for a later dependency
-analysis phase. It introduces no implementation channels, controllers, storage,
-delays, pipeline stages, or RTL.
+- `CommunicationSite`: source-order/control anchor;
+- unique symbolic `Enable`;
+- `BodyChannel`: internal BODY/wrapper token identity;
+- `BodySend` or `BodyReceive`: unconditional BODY-side communication;
+- `NormalizedSend` or `NormalizedReceive`: wrapper-side external semantics.
+
+A conditional communication is NOT represented by a behavioral `Skip`.
+
+`CommunicationSite` is a standalone Phase 3 marker. It preserves control and
+source ordering but does not itself perform the BODY token transfer.
+
+The site, BODY communication, BODY channel, enable, and normalized wrapper
+share exact semantic object identities. Phase 4 uses those identities directly
+rather than reconstructing associations from source locations.
+
+Nested conditions may be composed symbolically in Phase 3.
+
+## Conditional Receive IR
+
+`NormalizedReceive` represents conditional external consumption.
+
+Its shared `DummyToken(data_is_valid=False)` represents the disabled path:
+
+- no external token is consumed or acknowledged;
+- BODY-side communication still produces one token.
+
+`BodyReceive.data_valid_when` references the exact shared `Enable`.
+
+Later dependency analysis must ensure consumers cannot use invalid dummy data
+outside the guard that makes the receive valid.
+
+## Conditional Send IR
+
+`NormalizedSend` represents conditional external Send semantics.
+
+`BodySend` represents the unconditional BODY-side token transfer.
+
+`BodySend.payload_valid_when` references the exact shared `Enable`.
+
+Source continuation after a conditional Send is ordered downstream after
+normalized wrapper completion, rather than merely after internal BODY-token
+handoff.
+
+## Verification View
+
+Decomposed SVCSP may be emitted directly from this same `NormalizedModule`.
+
+It is:
+
+- an output/verification view;
+- not a second IR;
+- not reparsed into the Phase 4-7 backend.
+
+The emitted decomposed SVCSP may introduce executable CSP enable, BODY, and
+completion Channels to realize the normalized semantics, but those emitted
+Channels do not replace the Phase 3 symbolic IR identities.
+
+## Non-Goals
+
+Phase 3 introduces no:
+
+- pipeline stages;
+- bundled-data controllers;
+- storage primitives;
+- matched delays;
+- structural RTL.
