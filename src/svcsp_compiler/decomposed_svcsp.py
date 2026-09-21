@@ -1,8 +1,8 @@
-"""Emit the Phase 3 conditional-Send decomposition as SVCSP source text.
+"""Emit a narrow Phase 3 conditional-communication decomposition as SVCSP text.
 
 This is a source-level decomposition emitter, not an RTL emitter and not a new
 IR.  It consumes ``NormalizedModule`` directly and intentionally supports one
-conditional Send occurrence only.
+conditional Send or Receive occurrence only.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from . import communication_normalization as normalization
 
 
 class DecomposedSVCSPError(ValueError):
-    """A normalized module is outside the conditional-Send emitter MVP."""
+    """A normalized module is outside the decomposed-SVCSP emitter MVP."""
 
 
 _IDENTIFIER = re.compile(r'^[A-Za-z_][A-Za-z0-9_$]*$')
@@ -27,13 +27,13 @@ def _identifier(value: str, context: str) -> str:
 
 def _width(payload_type: behavioral.PayloadType | None) -> str:
     if payload_type is None:
-        raise DecomposedSVCSPError('cannot establish conditional Send payload width')
+        raise DecomposedSVCSPError('cannot establish conditional communication payload width')
     width = payload_type.width
     if width.bits is not None:
         return str(width.bits)
     if width.symbolic is not None and width.parameters:
         return width.symbolic
-    raise DecomposedSVCSPError('conditional Send payload width is unresolved')
+    raise DecomposedSVCSPError('conditional communication payload width is unresolved')
 
 
 def _type(payload_type: behavioral.PayloadType) -> str:
@@ -156,10 +156,10 @@ def _render_regular(process: normalization.NormalizedProcess, indent: int) -> li
 
 def _render_body_process(process: normalization.NormalizedProcess,
                          site: normalization.CommunicationSite,
-                         communication: normalization.BodySend,
+                         communication: normalization.BodyCommunication,
                          enable_channel: str,
                          indent: int) -> list[str]:
-    """Render one supported direct-site If while hoisting the BODY Send."""
+    """Render one supported direct-site If with an unconditional BODY operation."""
     prefix = '  ' * indent
     if isinstance(process, behavioral.Sequence):
         lines: list[str] = []
@@ -169,12 +169,12 @@ def _render_body_process(process: normalization.NormalizedProcess,
     if not _contains_site(process, site):
         return _render_regular(process, indent)
     if not isinstance(process, behavioral.If):
-        raise DecomposedSVCSPError('conditional Send site must be directly contained by an If in this MVP')
+        raise DecomposedSVCSPError('conditional communication site must be directly contained by an If in this MVP')
 
     then_site = _direct_site_branch(process.then_branch, site)
     else_site = _direct_site_branch(process.else_branch, site)
     if then_site == else_site:
-        raise DecomposedSVCSPError('conditional Send site must occur in exactly one direct If branch')
+        raise DecomposedSVCSPError('conditional communication site must occur in exactly one direct If branch')
 
     lines = [f'{prefix}{enable_channel}.Send({_expression(communication.enable.condition)});']
     residual = process.else_branch if then_site else process.then_branch
@@ -183,7 +183,13 @@ def _render_body_process(process: normalization.NormalizedProcess,
         lines.append(f'{prefix}if ({residual_condition}) begin')
         lines.extend(_render_regular(residual, indent + 1))
         lines.append(f'{prefix}end')
-    lines.append(f'{prefix}{_identifier(communication.channel.id, "body channel")}.Send({_expression(communication.value)});')
+    body_channel = _identifier(communication.channel.id, 'body channel')
+    if isinstance(communication, normalization.BodySend):
+        lines.append(f'{prefix}{body_channel}.Send({_expression(communication.value)});')
+    elif isinstance(communication, normalization.BodyReceive):
+        lines.append(f'{prefix}{body_channel}.Receive({_target(communication.target)});')
+    else:
+        raise DecomposedSVCSPError('unsupported BODY communication')
     return lines
 
 
@@ -203,36 +209,49 @@ def _module_header(name: str, ports: list[str], parameters: tuple[behavioral.Par
 
 
 def emit_conditional_send_decomposition(module: normalization.NormalizedModule) -> str:
-    """Emit one conditional-Send TOP_BODY/wrapper/TOP_DECOMPOSED composition.
+    """Emit one conditional Send/Receive BODY/wrapper/top composition.
 
-    This MVP rejects conditional Receive, multiple wrappers, selected endpoints,
-    nested/non-direct conditional sites, parallel behavior, and shared ordinary
-    use of the conditional external endpoint.
+    This MVP rejects multiple wrappers, selected endpoints, nested/non-direct
+    conditional sites, parallel behavior, and shared ordinary use of the
+    conditional external endpoint.
     """
     if not isinstance(module, normalization.NormalizedModule):
         raise DecomposedSVCSPError('expected a NormalizedModule')
-    if any(isinstance(wrapper, normalization.NormalizedReceive) for wrapper in module.wrappers):
-        raise DecomposedSVCSPError('conditional Receive is unsupported by the conditional-Send emitter')
     if len(module.wrappers) != 1 or len(module.body_communications) != 1:
-        raise DecomposedSVCSPError('conditional-Send emitter requires exactly one conditional Send occurrence')
+        raise DecomposedSVCSPError('decomposed-SVCSP emitter requires exactly one conditional communication occurrence')
     wrapper = module.wrappers[0]
     communication = module.body_communications[0]
-    if not isinstance(wrapper, normalization.NormalizedSend) or not isinstance(communication, normalization.BodySend):
-        raise DecomposedSVCSPError('conditional-Send wrapper/body communication mismatch')
+    if not isinstance(wrapper, (normalization.NormalizedSend, normalization.NormalizedReceive)):
+        raise DecomposedSVCSPError('unsupported conditional wrapper')
+    if ((isinstance(wrapper, normalization.NormalizedSend) and not isinstance(communication, normalization.BodySend)) or
+            (isinstance(wrapper, normalization.NormalizedReceive) and not isinstance(communication, normalization.BodyReceive))):
+        raise DecomposedSVCSPError('conditional wrapper/body communication mismatch')
     if (wrapper.site is not communication.site or wrapper.body_channel is not communication.channel or
-            wrapper.enable is not communication.enable or communication.payload_valid_when is not wrapper.enable):
-        raise DecomposedSVCSPError('conditional-Send identities are inconsistent')
+            wrapper.enable is not communication.enable):
+        raise DecomposedSVCSPError('conditional communication identities are inconsistent')
+    if isinstance(communication, normalization.BodySend) and communication.payload_valid_when is not wrapper.enable:
+        raise DecomposedSVCSPError('conditional Send identities are inconsistent')
+    if isinstance(communication, normalization.BodyReceive) and (
+            communication.data_valid_when is not wrapper.enable or
+            communication.disabled_token is not wrapper.disabled_token):
+        raise DecomposedSVCSPError('conditional Receive identities are inconsistent')
+    if isinstance(wrapper, normalization.NormalizedReceive) and (
+            not wrapper.consumes_external_when_enabled or
+            not wrapper.forwards_real_data_when_enabled or
+            wrapper.acknowledges_external_when_disabled or
+            not wrapper.provides_body_token_when_disabled):
+        raise DecomposedSVCSPError('conditional Receive semantics are unsupported by the decomposed-SVCSP emitter')
     if wrapper.endpoint.selectors:
-        raise DecomposedSVCSPError('selected conditional endpoints are unsupported by the conditional-Send emitter')
+        raise DecomposedSVCSPError('selected conditional endpoints are unsupported by the decomposed-SVCSP emitter')
     if isinstance(module.body, behavioral.Parallel):
-        raise DecomposedSVCSPError('parallel behavior is unsupported by the conditional-Send emitter')
+        raise DecomposedSVCSPError('parallel behavior is unsupported by the decomposed-SVCSP emitter')
 
     ordinary: set[behavioral.ChannelEndpoint] = set()
     _ordinary_channels(module.body, ordinary)
     if any(_same_external_endpoint(wrapper.endpoint, endpoint) for endpoint in ordinary):
         raise DecomposedSVCSPError('conditional endpoint also has ordinary BODY communication')
     if any(channel.selectors for channel in ordinary):
-        raise DecomposedSVCSPError('selected ordinary endpoints are unsupported by the conditional-Send emitter')
+        raise DecomposedSVCSPError('selected ordinary endpoints are unsupported by the decomposed-SVCSP emitter')
 
     declared_wrapper_endpoints = [channel for channel in module.channels
                                   if _same_external_endpoint(channel, wrapper.endpoint)]
@@ -240,10 +259,12 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
         raise DecomposedSVCSPError('conditional endpoint is not a module external interface')
     variable_names = [_identifier(variable.name, 'variable') for variable in module.variables]
     if len(variable_names) != len(set(variable_names)) or any(variable.scope != ('module',) for variable in module.variables):
-        raise DecomposedSVCSPError('shadowed or block-local variables are unsupported by the conditional-Send emitter')
+        raise DecomposedSVCSPError('shadowed or block-local variables are unsupported by the decomposed-SVCSP emitter')
 
     body_name = f'{_identifier(module.name, "module")}_BODY'
-    wrapper_name = f'{_identifier(module.name, "module")}_X_SEND_0'
+    wrapper_kind = 'SEND' if isinstance(wrapper, normalization.NormalizedSend) else 'RECV'
+    wrapper_instance = 'x_send' if isinstance(wrapper, normalization.NormalizedSend) else 'x_recv'
+    wrapper_name = f'{_identifier(module.name, "module")}_X_{wrapper_kind}_0'
     top_name = f'{_identifier(module.name, "module")}_DECOMPOSED'
     internal_name = _identifier(communication.channel.id, 'body channel')
     enable_channel_name = _identifier(f'enable_channel_{wrapper.enable.occurrence}', 'enable channel')
@@ -274,8 +295,16 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
     lines.append('  logic enable_token;')
     lines.append('  always begin')
     lines.append(f'    {enable_channel_name}.Receive(enable_token);')
-    lines.append(f'    {internal_name}.Receive(body_payload);')
-    lines.append('    if (enable_token) external_channel.Send(body_payload);')
+    if isinstance(wrapper, normalization.NormalizedSend):
+        lines.append(f'    {internal_name}.Receive(body_payload);')
+        lines.append('    if (enable_token) external_channel.Send(body_payload);')
+    else:
+        lines.append('    if (enable_token) begin')
+        lines.append('      external_channel.Receive(body_payload);')
+        lines.append('    end else begin')
+        lines.append("      body_payload = '0;")
+        lines.append('    end')
+        lines.append(f'    {internal_name}.Send(body_payload);')
     lines.append('  end')
     lines.append('endmodule')
     lines.append('')
@@ -289,7 +318,7 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
     lines.append(f'  {body_name} body (')
     lines.append('    ' + ',\n    '.join(body_connections))
     lines.append('  );')
-    lines.append(f'  {wrapper_name} x_send (')
+    lines.append(f'  {wrapper_name} {wrapper_instance} (')
     lines.append(f'    .external_channel({external_name}),')
     lines.append(f'    .{internal_name}({internal_name}),')
     lines.append(f'    .{enable_channel_name}({enable_channel_name})')

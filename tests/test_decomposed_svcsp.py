@@ -13,6 +13,7 @@ from svcsp_compiler import (
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_send_decomposition.sv'
+RECEIVE_FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_receive_decomposition.sv'
 IVERILOG = shutil.which('iverilog')
 VVP = shutil.which('vvp')
 
@@ -339,10 +340,48 @@ def test_ordinary_external_receive_is_preserved_in_body_and_top_interface():
     assert '.external_channel(R)' in text
 
 
-def test_conditional_receive_fails_closed():
-    module = normalized('''module m(Channel #(8) A); logic c; logic [7:0] x; always
-if (c) A.Receive(x); endmodule''')
-    with pytest.raises(DecomposedSVCSPError, match='conditional Receive'):
+def test_conditional_receive_emits_body_wrapper_and_composed_top():
+    text = emit_conditional_send_decomposition(normalized(RECEIVE_FIXTURE.read_text()))
+
+    assert 'module conditional_receive_decomposition_BODY (' in text
+    assert 'module conditional_receive_decomposition_X_RECV_0 (' in text
+    assert 'module conditional_receive_decomposition_DECOMPOSED (' in text
+    assert 'Channel #(8) body_channel_0();' in text
+    assert 'Channel #(1) enable_channel_0();' in text
+    assert 'conditional_receive_decomposition_X_RECV_0 x_recv (' in text
+
+
+def test_body_receive_is_unconditional_and_enable_is_body_produced():
+    text = emit_conditional_send_decomposition(normalized(RECEIVE_FIXTURE.read_text()))
+    body = text.split('module conditional_receive_decomposition_X_RECV_0', 1)[0]
+
+    assert 'Control.Receive(enable);' in body
+    assert 'enable_channel_0.Send(enable);' in body
+    assert 'body_channel_0.Receive(data);' in body
+    assert 'L.Receive(data);' not in body
+    assert body.index('enable_channel_0.Send(enable);') < body.index('body_channel_0.Receive(data);')
+
+
+def test_receive_wrapper_receives_enable_then_forwards_real_or_dummy_token():
+    text = emit_conditional_send_decomposition(normalized(RECEIVE_FIXTURE.read_text()))
+    wrapper = text.split('module conditional_receive_decomposition_X_RECV_0', 1)[1].split(
+        'module conditional_receive_decomposition_DECOMPOSED', 1,
+    )[0]
+
+    assert 'enable_channel_0.Receive(enable_token);' in wrapper
+    assert 'if (enable_token) begin\n      external_channel.Receive(body_payload);' in wrapper
+    assert "end else begin\n      body_payload = '0;" in wrapper
+    assert 'body_channel_0.Send(body_payload);' in wrapper
+    assert 'external_channel.Receive(body_payload);' not in wrapper.split('end else begin', 1)[1]
+    assert wrapper.index('enable_channel_0.Receive(enable_token);') < wrapper.index(
+        'external_channel.Receive(body_payload);'
+    ) < wrapper.index('body_channel_0.Send(body_payload);')
+
+
+def test_multiple_conditional_communications_fail_closed():
+    module = normalized('''module m(Channel #(8) A, Channel #(8) B); logic c; logic [7:0] x; always begin
+if (c) A.Receive(x); if (c) B.Receive(x); end endmodule''')
+    with pytest.raises(DecomposedSVCSPError, match='exactly one conditional communication'):
         emit_conditional_send_decomposition(module)
 
 
@@ -531,3 +570,210 @@ endmodule
     )
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
     assert 'PASS conditional Send equivalence: original=1,3 decomposed=1,3' in run_result.stdout
+
+
+def test_conditional_receive_decomposition_is_behaviorally_equivalent(tmp_path):
+    """Compare real four-phase handshakes for enabled and disabled receives."""
+    original = RECEIVE_FIXTURE.read_text()
+    decomposed = emit_conditional_send_decomposition(normalized(original))
+    original_path = tmp_path / 'original_flat.sv'
+    decomposed_path = tmp_path / 'decomposed_flat.sv'
+    testbench_path = tmp_path / 'tb.sv'
+    executable = tmp_path / 'simulation'
+    original_path.write_text(_flatten_channel_svcsp_for_icarus(original))
+    decomposed_path.write_text(_flatten_channel_svcsp_for_icarus(decomposed))
+    if not (IVERILOG and VVP):
+        pytest.skip('Icarus Verilog is not available')
+    testbench_path.write_text(r'''
+`timescale 1ns/1ps
+module tb;
+  logic control_original_payload = 1'b0;
+  logic control_original_request = 1'b0;
+  wire control_original_acknowledge;
+  logic [7:0] l_original_payload = '0;
+  logic l_original_request = 1'b0;
+  wire l_original_acknowledge;
+  wire [7:0] r_original_payload;
+  wire r_original_request;
+  logic r_original_acknowledge = 1'b0;
+
+  logic control_decomposed_payload = 1'b0;
+  logic control_decomposed_request = 1'b0;
+  wire control_decomposed_acknowledge;
+  logic [7:0] l_decomposed_payload = '0;
+  logic l_decomposed_request = 1'b0;
+  wire l_decomposed_acknowledge;
+  wire [7:0] r_decomposed_payload;
+  wire r_decomposed_request;
+  logic r_decomposed_acknowledge = 1'b0;
+
+  logic [7:0] original_trace [0:3];
+  logic [7:0] decomposed_trace [0:3];
+  integer original_count = 0;
+  integer decomposed_count = 0;
+  integer original_l_transactions = 0;
+  integer decomposed_l_transactions = 0;
+
+  conditional_receive_decomposition original (
+    .Control_payload(control_original_payload),
+    .Control_request(control_original_request),
+    .Control_acknowledge(control_original_acknowledge),
+    .L_payload(l_original_payload),
+    .L_request(l_original_request),
+    .L_acknowledge(l_original_acknowledge),
+    .R_payload(r_original_payload),
+    .R_request(r_original_request),
+    .R_acknowledge(r_original_acknowledge)
+  );
+  conditional_receive_decomposition_DECOMPOSED decomposed (
+    .Control_payload(control_decomposed_payload),
+    .Control_request(control_decomposed_request),
+    .Control_acknowledge(control_decomposed_acknowledge),
+    .L_payload(l_decomposed_payload),
+    .L_request(l_decomposed_request),
+    .L_acknowledge(l_decomposed_acknowledge),
+    .R_payload(r_decomposed_payload),
+    .R_request(r_decomposed_request),
+    .R_acknowledge(r_decomposed_acknowledge)
+  );
+
+  task automatic send_control_original(input logic value);
+    control_original_payload = value;
+    control_original_request = 1'b1;
+    wait (control_original_acknowledge === 1'b1);
+    control_original_request = 1'b0;
+    wait (control_original_acknowledge === 1'b0);
+  endtask
+
+  task automatic send_control_decomposed(input logic value);
+    control_decomposed_payload = value;
+    control_decomposed_request = 1'b1;
+    wait (control_decomposed_acknowledge === 1'b1);
+    control_decomposed_request = 1'b0;
+    wait (control_decomposed_acknowledge === 1'b0);
+  endtask
+
+  task automatic drive_enable(input logic value);
+    fork
+      send_control_original(value);
+      send_control_decomposed(value);
+    join
+  endtask
+
+  task automatic send_l_original(input logic [7:0] value);
+    l_original_payload = value;
+    l_original_request = 1'b1;
+    wait (l_original_acknowledge === 1'b1);
+    l_original_request = 1'b0;
+    wait (l_original_acknowledge === 1'b0);
+    original_l_transactions = original_l_transactions + 1;
+  endtask
+
+  task automatic send_l_decomposed(input logic [7:0] value);
+    l_decomposed_payload = value;
+    l_decomposed_request = 1'b1;
+    wait (l_decomposed_acknowledge === 1'b1);
+    l_decomposed_request = 1'b0;
+    wait (l_decomposed_acknowledge === 1'b0);
+    decomposed_l_transactions = decomposed_l_transactions + 1;
+  endtask
+
+  task automatic drive_enabled_input(input logic [7:0] value);
+    fork
+      send_l_original(value);
+      send_l_decomposed(value);
+    join
+  endtask
+
+  task automatic receive_original(output logic [7:0] value);
+    wait (r_original_request === 1'b1);
+    value = r_original_payload;
+    r_original_acknowledge = 1'b1;
+    wait (r_original_request === 1'b0);
+    r_original_acknowledge = 1'b0;
+  endtask
+
+  task automatic receive_decomposed(output logic [7:0] value);
+    wait (r_decomposed_request === 1'b1);
+    value = r_decomposed_payload;
+    r_decomposed_acknowledge = 1'b1;
+    wait (r_decomposed_request === 1'b0);
+    r_decomposed_acknowledge = 1'b0;
+  endtask
+
+  task automatic receive_same_output(input logic [7:0] expected);
+    logic [7:0] original_value;
+    logic [7:0] decomposed_value;
+    fork
+      receive_original(original_value);
+      receive_decomposed(decomposed_value);
+    join
+    if (original_value !== expected || decomposed_value !== expected)
+      $fatal(1, "unexpected output original=%0d decomposed=%0d expected=%0d",
+             original_value, decomposed_value, expected);
+    original_trace[original_count] = original_value;
+    decomposed_trace[decomposed_count] = decomposed_value;
+    original_count = original_count + 1;
+    decomposed_count = decomposed_count + 1;
+  endtask
+
+  task automatic require_disabled_l_is_unacknowledged;
+    #1;
+    if (l_original_request !== 1'b0 || l_original_acknowledge !== 1'b0)
+      $fatal(1, "original consumed or acknowledged disabled L");
+    if (l_decomposed_request !== 1'b0 || l_decomposed_acknowledge !== 1'b0)
+      $fatal(1, "decomposed consumed or acknowledged disabled L");
+  endtask
+
+  initial begin
+    // Enable pattern 1, 0, 1, 0.  L tokens are driven only for enabled iterations.
+    drive_enable(1'b1);
+    drive_enabled_input(8'd11);
+    receive_same_output(8'd11);
+
+    drive_enable(1'b0);
+    require_disabled_l_is_unacknowledged();
+    receive_same_output(8'd0);
+
+    drive_enable(1'b1);
+    drive_enabled_input(8'd33);
+    receive_same_output(8'd33);
+
+    drive_enable(1'b0);
+    require_disabled_l_is_unacknowledged();
+    receive_same_output(8'd0);
+
+    if (original_l_transactions != 2 || decomposed_l_transactions != 2)
+      $fatal(1, "enabled iterations did not consume exactly one L token each");
+    if (original_count != 4 || decomposed_count != 4)
+      $fatal(1, "BODY did not progress through every iteration");
+    if (original_trace[0] !== decomposed_trace[0] ||
+        original_trace[1] !== decomposed_trace[1] ||
+        original_trace[2] !== decomposed_trace[2] ||
+        original_trace[3] !== decomposed_trace[3])
+      $fatal(1, "external output traces differ");
+    $display("PASS conditional Receive equivalence: original=%0d,%0d,%0d,%0d decomposed=%0d,%0d,%0d,%0d disabled_L_ack=0",
+             original_trace[0], original_trace[1], original_trace[2], original_trace[3],
+             decomposed_trace[0], decomposed_trace[1], decomposed_trace[2], decomposed_trace[3]);
+    $finish;
+  end
+
+  initial begin
+    #100;
+    $fatal(1, "conditional Receive equivalence test timed out");
+  end
+endmodule
+''')
+
+    compile_result = subprocess.run(
+        [IVERILOG, '-g2012', '-s', 'tb', '-o', str(executable),
+         str(original_path), str(decomposed_path), str(testbench_path)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    run_result = subprocess.run(
+        [VVP, str(executable)], cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+    assert ('PASS conditional Receive equivalence: original=11,0,33,0 '
+            'decomposed=11,0,33,0 disabled_L_ack=0') in run_result.stdout
