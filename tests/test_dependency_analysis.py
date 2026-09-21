@@ -30,8 +30,8 @@ A.Receive(x); B.Send(x); end endmodule''')
 
 
 def test_receive_assign_send_has_data_flow():
-    graph = analyze('''module m(interface A, B); logic x; always begin
-A.Receive(x); x = x + 1; B.Send(x); end endmodule''')
+    graph = analyze('''module m(interface A, B); logic x, increment; always begin
+A.Receive(x); x = x + increment; B.Send(x); end endmodule''')
     receive, assign, send = [item for item in graph.nodes if item.label in {'receive', 'assign', 'send'}]
     data = edges(graph, DependencyKind.DATA)
     assert (receive.id, assign.id) in data

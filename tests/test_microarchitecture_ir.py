@@ -83,7 +83,7 @@ begin logic x; A.Receive(x); end B.Send(x); end endmodule''')
 
 
 def test_datapath_stage_storage_and_matched_delay_remain_symbolic():
-    micro_stage = stage(implement('module m; logic x; always x = x + 1; endmodule'), 'assign')
+    micro_stage = stage(implement('module m; logic x, increment; always x = x + increment; endmodule'), 'assign')
     assert micro_stage.storage.required is True
     assert micro_stage.storage.implementation is None
     assert micro_stage.combinational_logic[0].form == 'binary'

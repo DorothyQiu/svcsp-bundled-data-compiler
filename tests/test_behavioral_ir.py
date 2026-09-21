@@ -10,8 +10,8 @@ def lower(source, filename='behavior.sv'):
 
 
 def test_sequential_receive_assign_send():
-    ir = lower('''module m(interface L, R); logic data; always begin
-L.Receive(data); data = data + 1; R.Send(data); end endmodule''')
+    ir = lower('''module m(interface L, R); logic data, increment; always begin
+L.Receive(data); data = data + increment; R.Send(data); end endmodule''')
     assert isinstance(ir.body, Sequence)
     receive, assign, send = ir.body.items
     assert isinstance(receive, Receive) and receive.channel.name == 'L' and receive.target.name == 'data'
@@ -38,7 +38,7 @@ if (x) A.Send(x); else B.Send(x); endmodule''')
 
 def test_conditional_send_remains_inside_if():
     ir = lower('''module m(interface L, R); logic data; always begin
-L.Receive(data); if (data) R.Send(data); else data = 0; end endmodule''')
+L.Receive(data); if (data) R.Send(data); else data = data; end endmodule''')
     assert isinstance(ir.body, Sequence)
     assert isinstance(ir.body.items[1], If)
     assert isinstance(ir.body.items[1].then_branch, Send)
@@ -47,7 +47,7 @@ L.Receive(data); if (data) R.Send(data); else data = 0; end endmodule''')
 
 def test_conditional_receive_remains_inside_if():
     ir = lower('''module m(interface C, L); logic enable, data; always begin
-C.Receive(enable); if (enable) L.Receive(data); else data = 0; end endmodule''')
+C.Receive(enable); if (enable) L.Receive(data); else data = enable; end endmodule''')
     conditional = ir.body.items[1]
     assert isinstance(conditional, If)
     assert isinstance(conditional.then_branch, Receive)
@@ -146,7 +146,7 @@ def test_empty_fork_join_is_an_empty_parallel():
 
 
 def test_absent_else_lowers_to_skip():
-    ir = lower('module m; logic x; always if (x) x = 0; endmodule')
+    ir = lower('module m; logic x; always if (x) x = x; endmodule')
     assert isinstance(ir.body, If) and isinstance(ir.body.else_branch, Skip)
 
 

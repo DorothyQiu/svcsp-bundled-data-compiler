@@ -32,7 +32,7 @@ def test_unconditional_send_passes_through():
 
 def test_conditional_receive_becomes_receive_wrapper_with_dummy_token():
     ir = normalize('''module m(interface A); logic c, x; always
-if (c) A.Receive(x); else x = 0; endmodule''')
+if (c) A.Receive(x); else x = c; endmodule''')
     assert isinstance(ir.body, If) and isinstance(ir.body.then_branch, Skip)
     wrapper = ir.wrappers[0]
     assert isinstance(wrapper, NormalizedReceive)
@@ -47,7 +47,7 @@ if (c) A.Receive(x); else x = 0; endmodule''')
 
 def test_conditional_send_becomes_send_wrapper_that_consumes_body_token():
     ir = normalize('''module m(interface A); logic c, x; always
-if (c) A.Send(x); else x = 0; endmodule''')
+if (c) A.Send(x); else x = c; endmodule''')
     assert isinstance(ir.body, If) and isinstance(ir.body.then_branch, Skip)
     wrapper = ir.wrappers[0]
     assert isinstance(wrapper, NormalizedSend)

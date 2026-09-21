@@ -30,8 +30,8 @@ A.Receive(x); B.Send(x); end endmodule''')
 
 
 def test_receive_assign_send_preserves_data_dependencies():
-    graph = synthesize('''module m(interface A, B); logic x; always begin
-A.Receive(x); x = x + 1; B.Send(x); end endmodule''')
+    graph = synthesize('''module m(interface A, B); logic x, increment; always begin
+A.Receive(x); x = x + increment; B.Send(x); end endmodule''')
     receive, assign, send = stage(graph, 'receive'), stage(graph, 'assign'), stage(graph, 'send')
     data = stage_edges(graph, DependencyKind.DATA)
     assert (receive.id, assign.id) in data
