@@ -17,6 +17,11 @@ from .pipeline_synthesis import (
     PipelineDependency, PipelineGraph, PipelineMetadata, PipelineStage, PipelineSynthesisError,
     StageKind, WrapperAttachment, synthesize_pipeline,
 )
+from .microarchitecture_ir import (
+    ControllerKind, HandshakePort, MatchedDelayRequirement, MicroarchitectureDependency,
+    MicroarchitectureError, MicroarchitectureGraph, MicroarchitectureMetadata,
+    MicroarchitectureStage, MicroarchitectureWrapper, StorageRequirement, select_microarchitecture,
+)
 
 __all__ = [
     "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
@@ -29,4 +34,7 @@ __all__ = [
     "DependencyNode", "NodeKind", "analyze_dependencies",
     "PipelineDependency", "PipelineGraph", "PipelineMetadata", "PipelineStage", "PipelineSynthesisError",
     "StageKind", "WrapperAttachment", "synthesize_pipeline",
+    "ControllerKind", "HandshakePort", "MatchedDelayRequirement", "MicroarchitectureDependency",
+    "MicroarchitectureError", "MicroarchitectureGraph", "MicroarchitectureMetadata",
+    "MicroarchitectureStage", "MicroarchitectureWrapper", "StorageRequirement", "select_microarchitecture",
 ]
