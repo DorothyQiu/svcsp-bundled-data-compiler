@@ -158,13 +158,16 @@ def _render_body_process(process: normalization.NormalizedProcess,
                          site: normalization.CommunicationSite,
                          communication: normalization.BodyCommunication,
                          enable_channel: str,
+                         completion_channel: str | None,
                          indent: int) -> list[str]:
     """Render one supported direct-site If with an unconditional BODY operation."""
     prefix = '  ' * indent
     if isinstance(process, behavioral.Sequence):
         lines: list[str] = []
         for item in process.items:
-            lines.extend(_render_body_process(item, site, communication, enable_channel, indent))
+            lines.extend(_render_body_process(
+                item, site, communication, enable_channel, completion_channel, indent,
+            ))
         return lines
     if not _contains_site(process, site):
         return _render_regular(process, indent)
@@ -186,6 +189,9 @@ def _render_body_process(process: normalization.NormalizedProcess,
     body_channel = _identifier(communication.channel.id, 'body channel')
     if isinstance(communication, normalization.BodySend):
         lines.append(f'{prefix}{body_channel}.Send({_expression(communication.value)});')
+        if completion_channel is None:
+            raise DecomposedSVCSPError('conditional Send requires a completion channel')
+        lines.append(f'{prefix}{completion_channel}.Receive(completion_token);')
     elif isinstance(communication, normalization.BodyReceive):
         lines.append(f'{prefix}{body_channel}.Receive({_target(communication.target)});')
     else:
@@ -268,6 +274,7 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
     top_name = f'{_identifier(module.name, "module")}_DECOMPOSED'
     internal_name = _identifier(communication.channel.id, 'body channel')
     enable_channel_name = _identifier(f'enable_channel_{wrapper.enable.occurrence}', 'enable channel')
+    completion_channel_name = _identifier(f'completion_channel_{wrapper.enable.occurrence}', 'completion channel')
     external_name = _identifier(wrapper.endpoint.name, 'channel')
     body_external = [channel.name for channel in module.channels
                      if not _same_external_endpoint(channel, wrapper.endpoint)]
@@ -275,14 +282,22 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
     body_ports = [f'Channel {_identifier(name, "channel")}' for name in body_external]
     body_ports.extend([f'Channel {internal_name}', f'Channel {enable_channel_name}'])
     wrapper_ports = [f'Channel external_channel', f'Channel {internal_name}', f'Channel {enable_channel_name}']
+    if isinstance(wrapper, normalization.NormalizedSend):
+        body_ports.append(f'Channel {completion_channel_name}')
+        wrapper_ports.append(f'Channel {completion_channel_name}')
     top_ports = [f'Channel {_identifier(channel.name, "channel")}' for channel in module.channels]
 
     lines: list[str] = []
     lines.extend(_module_header(body_name, body_ports, module.parameters))
     for variable in module.variables:
         lines.append(f'  {_type(variable.payload_type)} {_identifier(variable.name, "variable")};')
+    if isinstance(wrapper, normalization.NormalizedSend):
+        lines.append('  logic completion_token;')
     lines.append('  always begin')
-    lines.extend(_render_body_process(module.body, wrapper.site, communication, enable_channel_name, 2))
+    lines.extend(_render_body_process(
+        module.body, wrapper.site, communication, enable_channel_name,
+        completion_channel_name if isinstance(wrapper, normalization.NormalizedSend) else None, 2,
+    ))
     lines.append('  end')
     lines.append('endmodule')
     lines.append('')
@@ -298,6 +313,7 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
     if isinstance(wrapper, normalization.NormalizedSend):
         lines.append(f'    {internal_name}.Receive(body_payload);')
         lines.append('    if (enable_token) external_channel.Send(body_payload);')
+        lines.append(f"    {completion_channel_name}.Send(1'b1);")
     else:
         lines.append('    if (enable_token) begin')
         lines.append('      external_channel.Receive(body_payload);')
@@ -312,16 +328,22 @@ def emit_conditional_send_decomposition(module: normalization.NormalizedModule) 
     lines.extend(_module_header(top_name, top_ports, module.parameters))
     lines.append(f'  Channel #({_width(payload_type)}) {internal_name}();')
     lines.append(f'  Channel #(1) {enable_channel_name}();')
+    if isinstance(wrapper, normalization.NormalizedSend):
+        lines.append(f'  Channel #(1) {completion_channel_name}();')
     body_connections = [f'.{_identifier(name, "channel")}({_identifier(name, "channel")})' for name in body_external]
     body_connections.extend([f'.{internal_name}({internal_name})',
                              f'.{enable_channel_name}({enable_channel_name})'])
+    if isinstance(wrapper, normalization.NormalizedSend):
+        body_connections.append(f'.{completion_channel_name}({completion_channel_name})')
     lines.append(f'  {body_name} body (')
     lines.append('    ' + ',\n    '.join(body_connections))
     lines.append('  );')
     lines.append(f'  {wrapper_name} {wrapper_instance} (')
     lines.append(f'    .external_channel({external_name}),')
     lines.append(f'    .{internal_name}({internal_name}),')
-    lines.append(f'    .{enable_channel_name}({enable_channel_name})')
+    lines.append(f'    .{enable_channel_name}({enable_channel_name})' +
+                 (f',\n    .{completion_channel_name}({completion_channel_name})'
+                  if isinstance(wrapper, normalization.NormalizedSend) else ''))
     lines.append('  );')
     lines.append('endmodule')
     return '\n'.join(lines) + '\n'

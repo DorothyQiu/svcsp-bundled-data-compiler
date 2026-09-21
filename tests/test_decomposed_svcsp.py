@@ -14,6 +14,7 @@ from svcsp_compiler import (
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_send_decomposition.sv'
 RECEIVE_FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_receive_decomposition.sv'
+SEND_ORDERING_FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_send_ordering.sv'
 IVERILOG = shutil.which('iverilog')
 VVP = shutil.which('vvp')
 
@@ -777,3 +778,131 @@ endmodule
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
     assert ('PASS conditional Receive equivalence: original=11,0,33,0 '
             'decomposed=11,0,33,0 disabled_L_ack=0') in run_result.stdout
+
+
+def test_conditional_send_external_completion_precedes_following_send(tmp_path):
+    """Require the decomposed SEND wrapper to preserve external blocking order."""
+    original = SEND_ORDERING_FIXTURE.read_text()
+    decomposed = emit_conditional_send_decomposition(normalized(original))
+    original_path = tmp_path / 'original_flat.sv'
+    decomposed_path = tmp_path / 'decomposed_flat.sv'
+    testbench_path = tmp_path / 'tb.sv'
+    executable = tmp_path / 'simulation'
+    original_path.write_text(_flatten_channel_svcsp_for_icarus(original))
+    decomposed_path.write_text(_flatten_channel_svcsp_for_icarus(decomposed))
+    if not (IVERILOG and VVP):
+        pytest.skip('Icarus Verilog is not available')
+    testbench_path.write_text(r'''
+`timescale 1ns/1ps
+module tb;
+  logic [7:0] l_original_payload = '0;
+  logic l_original_request = 1'b0;
+  wire l_original_acknowledge;
+  wire [7:0] r_original_payload;
+  wire r_original_request;
+  logic r_original_acknowledge = 1'b0;
+  wire [7:0] s_original_payload;
+  wire s_original_request;
+  logic s_original_acknowledge = 1'b0;
+
+  logic [7:0] l_decomposed_payload = '0;
+  logic l_decomposed_request = 1'b0;
+  wire l_decomposed_acknowledge;
+  wire [7:0] r_decomposed_payload;
+  wire r_decomposed_request;
+  logic r_decomposed_acknowledge = 1'b0;
+  wire [7:0] s_decomposed_payload;
+  wire s_decomposed_request;
+  logic s_decomposed_acknowledge = 1'b0;
+
+  conditional_send_ordering original (
+    .L_payload(l_original_payload), .L_request(l_original_request), .L_acknowledge(l_original_acknowledge),
+    .R_payload(r_original_payload), .R_request(r_original_request), .R_acknowledge(r_original_acknowledge),
+    .S_payload(s_original_payload), .S_request(s_original_request), .S_acknowledge(s_original_acknowledge)
+  );
+  conditional_send_ordering_DECOMPOSED decomposed (
+    .L_payload(l_decomposed_payload), .L_request(l_decomposed_request), .L_acknowledge(l_decomposed_acknowledge),
+    .R_payload(r_decomposed_payload), .R_request(r_decomposed_request), .R_acknowledge(r_decomposed_acknowledge),
+    .S_payload(s_decomposed_payload), .S_request(s_decomposed_request), .S_acknowledge(s_decomposed_acknowledge)
+  );
+
+  task automatic send_l_original(input logic [7:0] value);
+    l_original_payload = value; l_original_request = 1'b1;
+    wait (l_original_acknowledge === 1'b1); l_original_request = 1'b0;
+    wait (l_original_acknowledge === 1'b0);
+  endtask
+  task automatic send_l_decomposed(input logic [7:0] value);
+    l_decomposed_payload = value; l_decomposed_request = 1'b1;
+    wait (l_decomposed_acknowledge === 1'b1); l_decomposed_request = 1'b0;
+    wait (l_decomposed_acknowledge === 1'b0);
+  endtask
+  task automatic drive_l(input logic [7:0] value);
+    fork send_l_original(value); send_l_decomposed(value); join
+  endtask
+
+  task automatic complete_r_original;
+    wait (r_original_request === 1'b1); r_original_acknowledge = 1'b1;
+    wait (r_original_request === 1'b0); r_original_acknowledge = 1'b0;
+  endtask
+  task automatic complete_r_decomposed;
+    wait (r_decomposed_request === 1'b1); r_decomposed_acknowledge = 1'b1;
+    wait (r_decomposed_request === 1'b0); r_decomposed_acknowledge = 1'b0;
+  endtask
+  task automatic complete_s_original;
+    wait (s_original_request === 1'b1); s_original_acknowledge = 1'b1;
+    wait (s_original_request === 1'b0); s_original_acknowledge = 1'b0;
+  endtask
+  task automatic complete_s_decomposed;
+    wait (s_decomposed_request === 1'b1); s_decomposed_acknowledge = 1'b1;
+    wait (s_decomposed_request === 1'b0); s_decomposed_acknowledge = 1'b0;
+  endtask
+  task automatic complete_s;
+    fork complete_s_original(); complete_s_decomposed(); join
+  endtask
+
+  initial begin
+    // Enabled: deliberately leave R unacknowledged after both designs request it.
+    drive_l(8'd1);
+    wait (r_original_request === 1'b1 && r_decomposed_request === 1'b1);
+    #1;
+    if (s_original_request !== 1'b0)
+      $fatal(1, "original began S before R completed");
+    if (s_decomposed_request !== 1'b0)
+      $fatal(1, "decomposed began S before R completed");
+    if (r_original_acknowledge !== 1'b0 || r_decomposed_acknowledge !== 1'b0)
+      $fatal(1, "R was accidentally acknowledged during the ordering check");
+
+    fork complete_r_original(); complete_r_decomposed(); join
+    complete_s();
+
+    // Disabled: neither design may request R, and both must still reach S.
+    drive_l(8'd2);
+    #1;
+    if (r_original_request !== 1'b0 || r_decomposed_request !== 1'b0)
+      $fatal(1, "disabled iteration requested R");
+    wait (s_original_request === 1'b1 && s_decomposed_request === 1'b1);
+    complete_s();
+
+    $display("ORDER original=R_complete_before_S decomposed=R_complete_before_S disabled=R_idle_then_S");
+    $finish;
+  end
+
+  initial begin
+    #100;
+    $fatal(1, "conditional Send ordering test timed out");
+  end
+endmodule
+''')
+
+    compile_result = subprocess.run(
+        [IVERILOG, '-g2012', '-s', 'tb', '-o', str(executable),
+         str(original_path), str(decomposed_path), str(testbench_path)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    run_result = subprocess.run(
+        [VVP, str(executable)], cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+    assert ('ORDER original=R_complete_before_S decomposed=R_complete_before_S '
+            'disabled=R_idle_then_S') in run_result.stdout

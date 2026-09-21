@@ -111,6 +111,14 @@ if (c) A.Send(x); endmodule''', 'send_identity.sv')))
     assert normalized.body_communications[0].payload_valid_when is wrapper.operation.enable
 
 
+def test_conditional_send_wrapper_completion_precedes_following_ordinary_send_in_graph():
+    graph = analyze('''module m(interface L, R, S); logic [7:0] x; always begin
+L.Receive(x); if (x[0]) R.Send(x); S.Send(x); end endmodule''')
+    wrapper = node(graph, 'normalized_send')
+    send_s = next(item for item in graph.nodes if item.label == 'send' and item.endpoint.name == 'S')
+    assert (wrapper.id, send_s.id) in edges(graph, DependencyKind.SEQUENCE)
+
+
 def test_selected_endpoints_remain_distinct_in_graph_nodes():
     graph = analyze('''module m(interface A[2]); logic c, x; always begin
 if (c) A[0].Send(x); if (c) A[1].Receive(x); end endmodule''')
