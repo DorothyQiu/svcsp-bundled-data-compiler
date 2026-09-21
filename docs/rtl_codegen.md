@@ -19,6 +19,12 @@ Each selected template emits one named instance: `linear_controller`,
 emitted independently of wrapper instances. Storage and matched-delay instances
 exist only when their corresponding Phase 7A bound objects exist.
 
+Template parameters also come only from Phase 7A. Codegen groups the generic
+graph-level `BoundTemplateParameterBinding` objects by their already-bound
+instance and emits each exact formal/value pair. It never derives a value from
+connected signals or relies on a library default. For the MVP, this emits the
+required `abstract_storage` `.WIDTH(...)` binding.
+
 The module header and declarations come from Phase 7A `BoundModulePort`
 objects, separately from internal `BoundLogicalSignal` declarations. Receive
 endpoint request and payload ports are inputs and its acknowledge port is an

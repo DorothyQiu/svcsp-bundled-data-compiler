@@ -73,6 +73,49 @@ def _instances(graph: binding.BoundStructuralGraph) -> tuple[tuple[str, binding.
     return tuple(result)
 
 
+def _instance_parameter_bindings(
+        graph: binding.BoundStructuralGraph,
+        instance_contracts: dict[str, binding.TemplateContract],
+) -> dict[str, tuple[binding.BoundTemplateParameterBinding, ...]]:
+    """Group generic Phase 7A parameter bindings by their bound instance."""
+    parameter_set = set(graph.parameters)
+    grouped: dict[str, list[binding.BoundTemplateParameterBinding]] = {
+        instance_id: [] for instance_id in instance_contracts
+    }
+    seen: set[tuple[str, str]] = set()
+    for item in graph.parameter_bindings:
+        contract = instance_contracts.get(item.instance_id)
+        if contract is None:
+            raise RTLCodegenError(f'parameter binding refers to unknown instance {item.instance_id}')
+        if contract.parameter(item.formal_name) is None:
+            raise RTLCodegenError(f'{item.instance_id} has unknown template parameter {item.formal_name}')
+        key = item.instance_id, item.formal_name
+        if key in seen:
+            raise RTLCodegenError(f'{item.instance_id} has duplicate template parameter binding {item.formal_name}')
+        seen.add(key)
+        if isinstance(item.value, behavioral.PayloadWidth):
+            if (item.value.bits is None) == (item.value.symbolic is None):
+                raise RTLCodegenError(f'{item.instance_id}.{item.formal_name} has invalid bound width')
+            if item.value.symbolic is not None and (
+                    not item.value.parameters or
+                    any(parameter not in parameter_set for parameter in item.value.parameters)):
+                raise RTLCodegenError(
+                    f'{item.instance_id}.{item.formal_name} has unresolved symbolic parameter ownership')
+        elif isinstance(item.value, behavioral.Expression):
+            if any(parameter not in parameter_set for parameter in _expression_parameters(item.value)):
+                raise RTLCodegenError(
+                    f'{item.instance_id}.{item.formal_name} has unresolved symbolic parameter ownership')
+        else:
+            raise RTLCodegenError(f'{item.instance_id}.{item.formal_name} has unsupported parameter value')
+        grouped[item.instance_id].append(item)
+    for instance_id, contract in instance_contracts.items():
+        names = {item.formal_name for item in grouped[instance_id]}
+        for parameter in contract.parameters:
+            if parameter.required and parameter.name not in names:
+                raise RTLCodegenError(f'{instance_id} is missing required parameter {parameter.name}')
+    return {instance_id: tuple(items) for instance_id, items in grouped.items()}
+
+
 def _validate(graph: binding.BoundStructuralGraph) -> dict[str, binding.BoundLogicalSignal]:
     if not isinstance(graph, binding.BoundStructuralGraph):
         raise RTLCodegenError('expected a BoundStructuralGraph')
@@ -97,6 +140,8 @@ def _validate(graph: binding.BoundStructuralGraph) -> dict[str, binding.BoundLog
         if not parameter.name or parameter.name in parameter_names:
             raise RTLCodegenError('unresolved symbolic parameter ownership')
         parameter_names.add(parameter.name)
+
+    _instance_parameter_bindings(graph, instance_contracts)
 
     for signal in graph.signals:
         if signal.semantic_kind is binding.PortSemanticKind.PAYLOAD:
@@ -193,6 +238,27 @@ def _width_declaration(signal: binding.BoundLogicalSignal, parameters: dict[str,
     return f' [{_replace_parameter_words(width.symbolic, parameters)}-1:0]'
 
 
+def _width_parameter_value(width: behavioral.PayloadWidth, parameters: dict[str, str]) -> str:
+    """Render an already-bound template width parameter without inference."""
+    if width.bits is not None:
+        return str(width.bits)
+    if width.symbolic is None or not width.parameters:
+        raise RTLCodegenError('template parameter has unresolved symbolic width')
+    return _replace_parameter_words(width.symbolic, parameters)
+
+
+def _template_parameter_value(value: behavioral.PayloadWidth | behavioral.Expression,
+                              variables: dict[behavioral.Variable, str],
+                              parameters: dict[behavioral.Parameter, str],
+                              parameter_names: dict[str, str]) -> str:
+    """Render an already-bound generic template parameter value."""
+    if isinstance(value, behavioral.PayloadWidth):
+        return _width_parameter_value(value, parameter_names)
+    if isinstance(value, behavioral.Expression):
+        return _expression(value, variables, parameters)
+    raise RTLCodegenError('unsupported bound template parameter value')
+
+
 def _expression(expression: behavioral.Expression, variables: dict[behavioral.Variable, str],
                 parameters: dict[behavioral.Parameter, str]) -> str:
     if expression.form == 'name' and expression.variable is not None:
@@ -256,6 +322,15 @@ def _variables(graph: binding.BoundStructuralGraph) -> tuple[behavioral.Variable
     return tuple(dict.fromkeys(found))
 
 
+def _expression_parameters(expression: behavioral.Expression) -> tuple[behavioral.Parameter, ...]:
+    parameters: list[behavioral.Parameter] = []
+    if expression.parameter is not None:
+        parameters.append(expression.parameter)
+    for operand in expression.operands:
+        parameters.extend(_expression_parameters(operand))
+    return tuple(dict.fromkeys(parameters))
+
+
 def _instance_name(names: _Names, instance_id: str, template: binding.StructuralTemplate) -> str:
     prefix = {
         binding.StructuralTemplate.LINEAR_CONTROLLER: 'stage',
@@ -301,6 +376,8 @@ def emit_systemverilog(graph: binding.BoundStructuralGraph) -> str:
         instance_id: _instance_name(names, instance_id, template)
         for instance_id, template, _ in _instances(graph)
     }
+    instance_contracts = {instance_id: contract for instance_id, _, contract in _instances(graph)}
+    instance_parameter_bindings = _instance_parameter_bindings(graph, instance_contracts)
 
     lines: list[str] = []
     module_prefix = f'module {module_name}'
@@ -348,7 +425,15 @@ def emit_systemverilog(graph: binding.BoundStructuralGraph) -> str:
         for port in contract.ports:
             for port_binding in sorted(grouped[(instance_id, port.name)], key=lambda item: item.index):
                 connections.append(f'    .{port_binding.formal_name}({signal_names[port_binding.signal_id]})')
-        lines.append(f'  {template.value} {instance_names[instance_id]} (')
+        parameter_bindings = instance_parameter_bindings.get(instance_id, ())
+        if parameter_bindings:
+            parameters = ',\n'.join(
+                f'    .{item.formal_name}({_template_parameter_value(item.value, variable_names, parameter_names, parameter_by_source_name)})'
+                for item in parameter_bindings
+            )
+            lines.append(f'  {template.value} #(\n{parameters}\n  ) {instance_names[instance_id]} (')
+        else:
+            lines.append(f'  {template.value} {instance_names[instance_id]} (')
         lines.append(',\n'.join(connections))
         lines.append('  );')
     lines.append('endmodule')

@@ -3,7 +3,8 @@ from dataclasses import asdict, replace
 import pytest
 
 from svcsp_compiler import (
-    ModulePortRole, PortDirection, RTLCodegenError, SignalDriverKind, StructuralTemplate, TemplateBindingError,
+    BoundTemplateParameterBinding, ModulePortRole, PayloadWidth, PortDirection, RTLCodegenError,
+    SignalDriverKind, StructuralTemplate, TemplateBindingError,
     analyze_dependencies, bind_templates, emit_systemverilog,
     lower_behavioral, normalize_communication, parse_text, select_microarchitecture,
     synthesize_pipeline,
@@ -82,10 +83,48 @@ def test_storage_and_matched_delay_are_emitted_only_when_bound():
 x = x + increment; endmodule''')
     anchor = emit('''module m(interface C); logic c, x; always
 if (c) C.Send(x); endmodule''')
-    assert 'abstract_storage storage_storage_stage_0 (' in datapath
+    assert 'abstract_storage #(\n    .WIDTH(1)\n  ) storage_storage_stage_0 (' in datapath
     assert 'symbolic_matched_delay delay_matched_delay_stage_0 (' in datapath
     assert 'abstract_storage' not in anchor
     assert 'symbolic_matched_delay' not in anchor
+
+
+def test_storage_width_parameter_is_bound_before_codegen_for_scalar_and_concrete_payloads():
+    scalar = emit('''module m; logic x, y; always x = x + y; endmodule''')
+    concrete = emit('''module m; logic [7:0] x, y; always x = x + y; endmodule''')
+    assert 'abstract_storage #(\n    .WIDTH(1)\n  ) storage_storage_stage_0 (' in scalar
+    assert 'abstract_storage #(\n    .WIDTH(8)\n  ) storage_storage_stage_0 (' in concrete
+
+
+def test_storage_width_parameter_preserves_symbolic_parameter_identity():
+    rtl = emit('''module m #(parameter int W = 8); logic [W-1:0] x, y; always
+x = x + y; endmodule''')
+    assert 'abstract_storage #(\n    .WIDTH(W)\n  ) storage_storage_stage_0 (' in rtl
+
+
+def test_codegen_rejects_missing_required_storage_width_binding():
+    graph = bound('''module m; logic [7:0] x, y; always x = x + y; endmodule''')
+    incomplete = replace(graph, parameter_bindings=())
+    with pytest.raises(RTLCodegenError, match='missing required parameter WIDTH'):
+        emit_systemverilog(incomplete)
+
+
+def test_codegen_rejects_duplicate_unknown_and_invalid_instance_parameter_bindings():
+    graph = bound('''module m; logic [7:0] x, y; always x = x + y; endmodule''')
+    width = graph.parameter_bindings[0]
+    duplicate = replace(graph, parameter_bindings=graph.parameter_bindings + (width,))
+    unknown = replace(graph, parameter_bindings=(
+        BoundTemplateParameterBinding(width.instance_id, 'UNKNOWN', PayloadWidth(bits=8)),
+    ))
+    invalid_instance = replace(graph, parameter_bindings=(
+        BoundTemplateParameterBinding('missing_instance', width.formal_name, PayloadWidth(bits=8)),
+    ))
+    with pytest.raises(RTLCodegenError, match='duplicate template parameter binding'):
+        emit_systemverilog(duplicate)
+    with pytest.raises(RTLCodegenError, match='unknown template parameter'):
+        emit_systemverilog(unknown)
+    with pytest.raises(RTLCodegenError, match='unknown instance'):
+        emit_systemverilog(invalid_instance)
 
 
 def test_selected_endpoints_and_shadowed_variables_get_legal_distinct_names():

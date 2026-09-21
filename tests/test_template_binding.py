@@ -95,6 +95,24 @@ A.Receive(a); B.Receive(b); join endmodule''').body_stages
     assert topology.storage is None
 
 
+def test_storage_width_parameter_binding_is_explicit_and_preserves_symbolic_width():
+    concrete_graph = bind('''module m; logic [7:0] x, y; always x = x + y; endmodule''')
+    symbolic_graph = bind('''module m #(parameter int W = 8); logic [W-1:0] x, y; always
+x = x + y; endmodule''')
+    concrete = stage(concrete_graph, 'assign')
+    symbolic = stage(symbolic_graph, 'assign')
+    concrete_binding = next(item for item in concrete_graph.parameter_bindings
+                            if item.instance_id == concrete.storage.id)
+    symbolic_binding = next(item for item in symbolic_graph.parameter_bindings
+                            if item.instance_id == symbolic.storage.id)
+    assert not hasattr(concrete.storage, 'parameter_bindings')
+    assert concrete_binding.formal_name == 'WIDTH'
+    assert concrete_binding.value.bits == 8
+    assert symbolic_binding.formal_name == 'WIDTH'
+    assert symbolic_binding.value.symbolic == 'W'
+    assert symbolic_binding.value.parameters[0].name == 'W'
+
+
 def test_matched_delay_is_bound_only_when_present():
     delayed = stage(bind('''module m(interface C); logic a, b; always
 C.Send(a + b); endmodule'''), 'send')

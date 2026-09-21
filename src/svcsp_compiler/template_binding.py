@@ -96,9 +96,21 @@ class TemplatePort:
 class TemplateContract:
     template: StructuralTemplate
     ports: tuple[TemplatePort, ...]
+    parameters: tuple['TemplateParameter', ...] = ()
 
     def port(self, name: str) -> TemplatePort | None:
         return next((port for port in self.ports if port.name == name), None)
+
+    def parameter(self, name: str) -> 'TemplateParameter | None':
+        return next((parameter for parameter in self.parameters if parameter.name == name), None)
+
+
+@dataclass(frozen=True)
+class TemplateParameter:
+    """A formal template parameter resolved before structural RTL emission."""
+
+    name: str
+    required: bool = False
 
 
 def _ports(*ports: TemplatePort) -> tuple[TemplatePort, ...]:
@@ -175,7 +187,7 @@ TEMPLATE_CONTRACTS: tuple[TemplateContract, ...] = (
                      PortSemanticKind.CONTROL, minimum=1, maximum=1),
         TemplatePort('control_out', 'storage control output', PortDirection.OUTPUT,
                      PortSemanticKind.CONTROL, minimum=1, maximum=1),
-    )),
+    ), (TemplateParameter('WIDTH', required=True),)),
     TemplateContract(StructuralTemplate.SYMBOLIC_MATCHED_DELAY, _ports(
         TemplatePort('control_in', 'control input to delay', PortDirection.INPUT,
                      PortSemanticKind.CONTROL, minimum=1, maximum=1),
@@ -221,6 +233,15 @@ class BoundPortBinding:
     signal_id: str
     index: int = 0
     formal_name: str = ''
+
+
+@dataclass(frozen=True)
+class BoundTemplateParameterBinding:
+    """An exact template formal parameter and its Phase 7A-bound value."""
+
+    instance_id: str
+    formal_name: str
+    value: behavioral.PayloadWidth | behavioral.Expression
 
 
 @dataclass(frozen=True)
@@ -311,6 +332,7 @@ class BoundStructuralGraph:
     metadata: tuple[microarchitecture.MicroarchitectureMetadata, ...]
     signals: tuple[BoundLogicalSignal, ...]
     port_bindings: tuple[BoundPortBinding, ...]
+    parameter_bindings: tuple[BoundTemplateParameterBinding, ...] = ()
     parameters: tuple[behavioral.Parameter, ...] = ()
     module_ports: tuple[BoundModulePort, ...] = ()
 
@@ -348,11 +370,20 @@ def _wrapper_template(controller: microarchitecture.ControllerKind) -> Structura
         raise TemplateBindingError(f'{controller.value} is not a conditional wrapper controller') from error
 
 
-def _storage(stage: microarchitecture.MicroarchitectureStage) -> BoundStorage | None:
+def _storage(stage: microarchitecture.MicroarchitectureStage,
+             wrapper_endpoint: behavioral.ChannelEndpoint | None = None) -> BoundStorage | None:
     if stage.storage.required is not True:
         return None
-    return BoundStorage(f'storage_{stage.id}', StructuralTemplate.ABSTRACT_STORAGE,
-                        template_contract(StructuralTemplate.ABSTRACT_STORAGE), stage.storage)
+    payload_type = _payload_type(stage.variable, stage.endpoint or wrapper_endpoint)
+    if payload_type is None:
+        raise TemplateBindingError(f'cannot establish payload width for storage stage {stage.id}')
+    storage_id = f'storage_{stage.id}'
+    return BoundStorage(
+        storage_id,
+        StructuralTemplate.ABSTRACT_STORAGE,
+        template_contract(StructuralTemplate.ABSTRACT_STORAGE),
+        stage.storage,
+    )
 
 
 def _matched_delay(stage: microarchitecture.MicroarchitectureStage) -> BoundMatchedDelay | None:
@@ -733,10 +764,71 @@ def _bind_storage_and_delays(stages: tuple[BoundBodyStage, ...], wrappers: tuple
             bindings.bind(stage.id, 'delayed_control', delayed_control)
             bindings.bind(stage.matched_delay.id, 'control_in', control)
             bindings.bind(stage.matched_delay.id, 'control_out', delayed_control)
+        elif stage.contract.port('delayed_control') is not None:
+            # No bundled-data combinational path needs matching for this
+            # stage.  Bind the controller's raw request explicitly as the
+            # downstream request path instead of relying on an unconnected
+            # delay-return port in the RTL template.
+            bindings.bind(stage.id, 'delayed_control', control)
+
+
+def _expression_parameters(expression: behavioral.Expression) -> tuple[behavioral.Parameter, ...]:
+    parameters: list[behavioral.Parameter] = []
+    if expression.parameter is not None:
+        parameters.append(expression.parameter)
+    for operand in expression.operands:
+        parameters.extend(_expression_parameters(operand))
+    return tuple(dict.fromkeys(parameters))
+
+
+def _validate_template_parameter_bindings(
+        contracts: dict[str, TemplateContract],
+        parameter_bindings: tuple[BoundTemplateParameterBinding, ...],
+        module_parameters: tuple[behavioral.Parameter, ...],
+) -> None:
+    """Validate generic instance parameters without relying on instance roles."""
+    module_parameter_set = set(module_parameters)
+    by_instance: dict[str, set[str]] = {instance_id: set() for instance_id in contracts}
+    for parameter_binding in parameter_bindings:
+        contract = contracts.get(parameter_binding.instance_id)
+        if contract is None:
+            raise TemplateBindingError(
+                f'parameter binding refers to unknown instance {parameter_binding.instance_id}')
+        if contract.parameter(parameter_binding.formal_name) is None:
+            raise TemplateBindingError(
+                f'{parameter_binding.instance_id} has unknown parameter {parameter_binding.formal_name}')
+        names = by_instance[parameter_binding.instance_id]
+        if parameter_binding.formal_name in names:
+            raise TemplateBindingError(
+                f'{parameter_binding.instance_id} has duplicate parameter binding {parameter_binding.formal_name}')
+        names.add(parameter_binding.formal_name)
+        value = parameter_binding.value
+        if isinstance(value, behavioral.PayloadWidth):
+            if (value.bits is None) == (value.symbolic is None):
+                raise TemplateBindingError(
+                    f'{parameter_binding.instance_id}.{parameter_binding.formal_name} has an invalid width')
+            if value.symbolic is not None and (
+                    not value.parameters or any(parameter not in module_parameter_set for parameter in value.parameters)):
+                raise TemplateBindingError(
+                    f'{parameter_binding.instance_id}.{parameter_binding.formal_name} has unresolved symbolic parameter ownership')
+        elif isinstance(value, behavioral.Expression):
+            if any(parameter not in module_parameter_set for parameter in _expression_parameters(value)):
+                raise TemplateBindingError(
+                    f'{parameter_binding.instance_id}.{parameter_binding.formal_name} has unresolved symbolic parameter ownership')
+        else:
+            raise TemplateBindingError(
+                f'{parameter_binding.instance_id}.{parameter_binding.formal_name} has unsupported parameter value')
+    for instance_id, contract in contracts.items():
+        names = by_instance[instance_id]
+        for parameter in contract.parameters:
+            if parameter.required and parameter.name not in names:
+                raise TemplateBindingError(f'{instance_id} is missing required parameter {parameter.name}')
 
 
 def _validate_bindings(stages: tuple[BoundBodyStage, ...], wrappers: tuple[BoundWrapper, ...],
-                       bindings: _Bindings) -> None:
+                       bindings: _Bindings,
+                       parameter_bindings: tuple[BoundTemplateParameterBinding, ...],
+                       module_parameters: tuple[behavioral.Parameter, ...]) -> None:
     contracts = {stage.id: stage.contract for stage in stages}
     contracts.update({wrapper.id: wrapper.contract for wrapper in wrappers})
     for stage in stages:
@@ -771,6 +863,7 @@ def _validate_bindings(stages: tuple[BoundBodyStage, ...], wrappers: tuple[Bound
             count = counts.get((instance_id, port.name), 0)
             if count < port.minimum or (port.maximum is not None and count > port.maximum):
                 raise TemplateBindingError(f'{instance_id}.{port.name} has {count} bindings outside its contract')
+    _validate_template_parameter_bindings(contracts, parameter_bindings, module_parameters)
 
 
 def _resolve_driver_ownership(signals: tuple[BoundLogicalSignal, ...],
@@ -820,13 +913,14 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
     if any(wrapper.id not in graph.stage(wrapper.attached_to).wrapper_attachments for wrapper in graph.wrappers):
         raise TemplateBindingError('wrapper attachment is missing from its BODY stage')
 
+    wrapper_endpoints = {wrapper.attached_to: wrapper.endpoint for wrapper in graph.wrappers}
     body_stages = tuple(BoundBodyStage(
         id=stage.id,
         controller_template=_body_template(stage.controller),
         contract=template_contract(_body_template(stage.controller)),
         operations=stage.body_operations,
         combinational_logic=stage.combinational_logic,
-        storage=_storage(stage),
+        storage=_storage(stage, wrapper_endpoints.get(stage.id)),
         matched_delay=_matched_delay(stage),
         handshake_inputs=stage.handshake_inputs,
         handshake_outputs=stage.handshake_outputs,
@@ -859,12 +953,21 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
     wrapper_send_payloads = _bind_wrapper_ports(graph, bindings, module_ports,
                                                 {stage.id: stage for stage in body_stages})
     _bind_storage_and_delays(body_stages, wrappers, bindings, external_payloads, wrapper_send_payloads)
-    _validate_bindings(body_stages, wrappers, bindings)
+    parameter_bindings = tuple(
+        BoundTemplateParameterBinding(
+            stage.storage.id,
+            'WIDTH',
+            _payload_type(stage.variable, stage.endpoint or wrapper_endpoints.get(stage.id)).width,
+        )
+        for stage in body_stages if stage.storage is not None
+    )
+    _validate_bindings(body_stages, wrappers, bindings, parameter_bindings, graph.parameters)
     resolved_signals = _resolve_driver_ownership(tuple(bindings.signals), tuple(bindings.bindings), contracts,
                                                   tuple(module_ports.ports))
     dependencies = tuple(BoundStructuralDependency(
         edge.source_node, edge.target_node, edge.kind, edge.source_stage, edge.target_stage,
     ) for edge in graph.dependencies)
     return BoundStructuralGraph(graph.module, TEMPLATE_CONTRACTS, body_stages, wrappers, dependencies,
-                                graph.metadata, resolved_signals, tuple(bindings.bindings), graph.parameters,
+                                graph.metadata, resolved_signals, tuple(bindings.bindings), parameter_bindings,
+                                graph.parameters,
                                 tuple(sorted(module_ports.ports, key=lambda port: port.name)))

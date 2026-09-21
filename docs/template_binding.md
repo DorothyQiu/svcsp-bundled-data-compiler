@@ -20,6 +20,15 @@ Storage is bound as `abstract_storage` only when the stage's
 their symbolic requirements and make no FF/latch selection or physical delay
 calculation.
 
+`BoundStructuralGraph.parameter_bindings` records generic
+`BoundTemplateParameterBinding` objects for every template instance. Each one
+contains an instance identity, exact formal parameter name, and an already
+bound symbolic value. Phase 7A validates instance ownership, formal names,
+duplicates, required parameters, and symbolic parameter ownership. For the MVP,
+every `abstract_storage` instance has an explicit `WIDTH` binding to its
+established storage payload `PayloadWidth`; it is concrete or symbolic with its
+existing parameter ownership.
+
 Each `TemplateContract` contains formal `TemplatePort` definitions with a name,
 role, direction, semantic kind, and connection multiplicity. The semantic kinds
 are handshake request, handshake acknowledge, payload, enable, and local
@@ -72,6 +81,12 @@ a later phase introduces explicit shared-channel arbitration or muxing.
 `symbolic_matched_delay` has control input/output ports and retains the Phase 6
 symbolic requirement. The bound graph adds these instances only when their
 Phase 6 requirements exist.
+
+For a LINEAR stage with a matched-delay binding, `local_control` carries the
+four-phase controller's raw request into `symbolic_matched_delay`; its delayed
+control output binds to `delayed_control`, which is the controller template's
+downstream request path. A LINEAR stage without a matched-data-path requirement
+binds `delayed_control` directly to `local_control` explicitly.
 
 `BoundLogicalSignal` identifies every connection without Verilog syntax. It can
 refer to a source/target stage, dependency kind, channel endpoint, variable,

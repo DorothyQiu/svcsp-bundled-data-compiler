@@ -25,9 +25,10 @@ from .microarchitecture_ir import (
 )
 from .template_binding import (
     BoundBodyStage, BoundLogicalSignal, BoundMatchedDelay, BoundPortBinding, BoundStorage,
+    BoundTemplateParameterBinding,
     BoundModulePort, BoundStructuralDependency, BoundStructuralGraph, BoundWrapper, ModulePortRole,
     BoundSignalDriver, PortDirection, PortSemanticKind, SignalDriverKind,
-    StructuralTemplate, TEMPLATE_CONTRACTS, TemplateBindingError, TemplateContract, TemplatePort,
+    StructuralTemplate, TEMPLATE_CONTRACTS, TemplateBindingError, TemplateContract, TemplateParameter, TemplatePort,
     bind_templates, template_contract,
 )
 from .rtl_codegen import RTLCodegenError, emit_systemverilog
@@ -47,9 +48,10 @@ __all__ = [
     "MicroarchitectureError", "MicroarchitectureGraph", "MicroarchitectureMetadata",
     "MicroarchitectureStage", "MicroarchitectureWrapper", "StorageRequirement", "select_microarchitecture",
     "BoundBodyStage", "BoundLogicalSignal", "BoundMatchedDelay", "BoundPortBinding", "BoundStorage",
+    "BoundTemplateParameterBinding",
     "BoundModulePort", "BoundStructuralDependency", "BoundStructuralGraph", "BoundWrapper", "ModulePortRole",
     "BoundSignalDriver", "PortDirection", "PortSemanticKind", "SignalDriverKind",
-    "StructuralTemplate", "TEMPLATE_CONTRACTS", "TemplateBindingError", "TemplateContract", "TemplatePort",
+    "StructuralTemplate", "TEMPLATE_CONTRACTS", "TemplateBindingError", "TemplateContract", "TemplateParameter", "TemplatePort",
     "bind_templates", "template_contract",
     "RTLCodegenError", "emit_systemverilog",
 ]
