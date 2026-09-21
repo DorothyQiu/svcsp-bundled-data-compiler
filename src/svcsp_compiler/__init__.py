@@ -9,6 +9,10 @@ from .communication_normalization import (
     DummyToken, Enable, NormalizationError, NormalizedModule, NormalizedReceive,
     NormalizedSend, normalize_communication,
 )
+from .dependency_analysis import (
+    DependencyAnalysisError, DependencyEdge, DependencyGraph, DependencyKind,
+    DependencyNode, NodeKind, analyze_dependencies,
+)
 
 __all__ = [
     "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
@@ -17,4 +21,6 @@ __all__ = [
     "DummyToken", "Enable", "NormalizationError", "NormalizedModule",
     "NormalizedReceive", "NormalizedSend", "lower_behavioral",
     "normalize_communication", "parse_file", "parse_text",
+    "DependencyAnalysisError", "DependencyEdge", "DependencyGraph", "DependencyKind",
+    "DependencyNode", "NodeKind", "analyze_dependencies",
 ]
