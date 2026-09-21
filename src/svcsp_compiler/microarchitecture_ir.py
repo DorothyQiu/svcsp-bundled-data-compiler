@@ -57,6 +57,8 @@ class MicroarchitectureStage:
     endpoint: behavioral.ChannelEndpoint | None = None
     variable: behavioral.Variable | None = None
     location: behavioral.SourceLocation | None = None
+    upstream_boundary: dependency.DependencyNode | None = None
+    downstream_boundary: dependency.DependencyNode | None = None
 
 
 @dataclass(frozen=True)
@@ -186,7 +188,7 @@ def select_microarchitecture(graph: pipeline.PipelineGraph) -> Microarchitecture
     inputs: dict[str, list[HandshakePort]] = {stage.id: [] for stage in graph.stages}
     outputs: dict[str, list[HandshakePort]] = {stage.id: [] for stage in graph.stages}
     for index, edge in enumerate(graph.dependencies):
-        if edge.source_stage and edge.target_stage:
+        if edge.source_stage and edge.target_stage and edge.source_stage != edge.target_stage:
             identity = f'handshake_{index}'
             outputs[edge.source_stage].append(HandshakePort(identity, edge.target_stage, edge.kind))
             inputs[edge.target_stage].append(HandshakePort(identity, edge.source_stage, edge.kind))
@@ -217,6 +219,8 @@ def select_microarchitecture(graph: pipeline.PipelineGraph) -> Microarchitecture
             endpoint=stage.endpoint,
             variable=stage.variable,
             location=stage.location,
+            upstream_boundary=stage.upstream_boundary,
+            downstream_boundary=stage.downstream_boundary,
         ))
     dependencies = tuple(MicroarchitectureDependency(edge.source_node, edge.target_node, edge.kind,
                                                       edge.source_stage, edge.target_stage)

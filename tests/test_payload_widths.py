@@ -52,9 +52,10 @@ A.Receive(x); y = x + increment; B.Send(y); end endmodule''')
     receive = next(node for node in dependencies.nodes if node.label == 'receive')
     assert receive.variable.payload_type.width.bits == 8
     receive_stage = next(stage for stage in pipeline.stages if stage.operations[0].label == 'receive')
+    assert [node.label for node in receive_stage.operations] == ['receive', 'assign', 'send']
     assert receive_stage.variable.payload_type.width.bits == 8
-    send_stage = next(stage for stage in microarchitecture.stages if stage.body_operations[0].label == 'send')
-    assert send_stage.endpoint.payload_type.width.bits == 8
+    body_stage = next(stage for stage in microarchitecture.stages if stage.body_operations[0].label == 'receive')
+    assert body_stage.endpoint.payload_type.width.bits == 8
     assert all(signal.width.bits == 8 for signal in payload_signals(graph))
 
 

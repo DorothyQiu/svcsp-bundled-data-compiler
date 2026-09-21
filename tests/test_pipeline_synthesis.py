@@ -21,21 +21,25 @@ def stage_edges(graph, kind):
             if edge.kind is kind and edge.source_stage and edge.target_stage}
 
 
-def test_linear_pipeline_has_one_stage_per_operation():
+def test_linear_receive_send_is_one_body_stage_with_boundaries():
     graph = synthesize('''module m(interface A, B); logic x; always begin
 A.Receive(x); B.Send(x); end endmodule''')
-    receive, send = stage(graph, 'receive'), stage(graph, 'send')
-    assert all(len(item.operations) == 1 for item in graph.stages)
-    assert (receive.id, send.id) in stage_edges(graph, DependencyKind.SEQUENCE)
+    assert len(graph.stages) == 1
+    body = graph.stages[0]
+    assert [node.label for node in body.operations] == ['receive', 'send']
+    assert body.upstream_boundary is body.operations[0]
+    assert body.downstream_boundary is body.operations[-1]
 
 
 def test_receive_assign_send_preserves_data_dependencies():
     graph = synthesize('''module m(interface A, B); logic x, increment; always begin
 A.Receive(x); x = x + increment; B.Send(x); end endmodule''')
-    receive, assign, send = stage(graph, 'receive'), stage(graph, 'assign'), stage(graph, 'send')
+    assert len(graph.stages) == 1
+    body = graph.stages[0]
+    receive, assign, send = body.operations
     data = stage_edges(graph, DependencyKind.DATA)
-    assert (receive.id, assign.id) in data
-    assert (assign.id, send.id) in data
+    assert data == {(body.id, body.id)}
+    assert [node.label for node in (receive, assign, send)] == ['receive', 'assign', 'send']
 
 
 def test_fork_join_branches_are_independent_and_have_join_stage():
@@ -93,15 +97,16 @@ if (c) A[0].Send(x); if (c) A[1].Receive(x); end endmodule''')
 def test_shadowed_variable_identity_is_preserved_by_stages():
     graph = synthesize('''module m(interface A, B); logic x; always begin
 begin logic x; A.Receive(x); end B.Send(x); end endmodule''')
-    receive, send = stage(graph, 'receive'), stage(graph, 'send')
-    assert receive.variable != send.operations[0].operation.value.variable
+    assert len(graph.stages) == 1
+    receive, send = graph.stages[0].operations
+    assert receive.variable != send.operation.value.variable
 
 
 def test_stage_identity_and_order_are_deterministic():
     source = '''module m(interface A, B); logic x; always begin A.Receive(x); B.Send(x); end endmodule'''
     first, second = synthesize(source), synthesize(source)
     assert [item.id for item in first.stages] == [item.id for item in second.stages]
-    assert [item.operations[0].label for item in first.stages] == ['receive', 'send']
+    assert [[operation.label for operation in item.operations] for item in first.stages] == [['receive', 'send']]
 
 
 def test_pipeline_synthesis_does_not_mutate_dependency_graph():

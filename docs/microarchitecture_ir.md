@@ -9,7 +9,10 @@ controller template kind, storage requirement, symbolic handshake ports, and an
 optional symbolic `MatchedDelayRequirement`. Pipeline dependencies and metadata
 are retained without changing topology.
 
-`OPERATION` stages select `LINEAR`; `JOIN` stages select `JOIN`.
+`OPERATION` stages select `LINEAR`; `JOIN` stages select `JOIN`. A grouped
+unconditional `Receive; Assign*; Send` BODY stage has one LINEAR controller:
+the Receive and Send are its external handshake boundaries, while Assigns are
+its combinational datapath, with no internal handshake between them.
 `MicroarchitectureWrapper` separately selects `CONDITIONAL_RECV` for an
 `into_body` attachment and `CONDITIONAL_SEND` for a `from_body` attachment. It
 retains wrapper identity, BODY-stage identity, `ChannelEndpoint`, `Enable`, and

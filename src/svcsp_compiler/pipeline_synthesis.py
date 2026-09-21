@@ -24,6 +24,8 @@ class PipelineStage:
     endpoint: behavioral.ChannelEndpoint | None = None
     variable: behavioral.Variable | None = None
     location: behavioral.SourceLocation | None = None
+    upstream_boundary: dependency.DependencyNode | None = None
+    downstream_boundary: dependency.DependencyNode | None = None
 
 
 @dataclass(frozen=True)
@@ -123,15 +125,40 @@ def synthesize_pipeline(graph: dependency.DependencyGraph) -> PipelineGraph:
     if any(edge.source not in known_nodes or edge.target not in known_nodes for edge in graph.edges):
         raise PipelineSynthesisError('dependency edge refers to an unknown node')
 
+    executable = tuple(node for node in graph.nodes
+                       if node.kind in {dependency.NodeKind.OPERATION, dependency.NodeKind.PARALLEL_JOIN})
+    linear_operations = tuple(node for node in executable if node.kind is dependency.NodeKind.OPERATION)
+    is_linear_transaction = (
+        len(executable) == len(linear_operations) and len(linear_operations) >= 2 and
+        isinstance(linear_operations[0].operation, behavioral.Receive) and
+        isinstance(linear_operations[-1].operation, behavioral.Send) and
+        all(isinstance(node.operation, behavioral.Assign) for node in linear_operations[1:-1])
+    )
+
     stages: list[PipelineStage] = []
     stage_ids: dict[str, str] = {}
-    for node in graph.nodes:
-        if node.kind not in {dependency.NodeKind.OPERATION, dependency.NodeKind.PARALLEL_JOIN}:
-            continue
-        stage_id = f'stage_{len(stages)}'
-        stage_ids[node.id] = stage_id
-        stages.append(PipelineStage(stage_id, _stage_kind(node), (node,), node.endpoint,
-                                    node.variable, node.location))
+    if is_linear_transaction:
+        receive, send = linear_operations[0], linear_operations[-1]
+        assignments = linear_operations[1:-1]
+        if sum(isinstance(node.operation, behavioral.Receive) for node in linear_operations) != 1 or \
+           sum(isinstance(node.operation, behavioral.Send) for node in linear_operations) != 1:
+            raise PipelineSynthesisError('linear transaction requires exactly one Receive and one Send')
+        stage_id = 'stage_0'
+        for node in linear_operations:
+            stage_ids[node.id] = stage_id
+        stages.append(PipelineStage(
+            stage_id, StageKind.OPERATION, linear_operations, send.endpoint,
+            assignments[-1].variable if assignments else receive.variable,
+            receive.location, receive, send,
+        ))
+    else:
+        for node in graph.nodes:
+            if node.kind not in {dependency.NodeKind.OPERATION, dependency.NodeKind.PARALLEL_JOIN}:
+                continue
+            stage_id = f'stage_{len(stages)}'
+            stage_ids[node.id] = stage_id
+            stages.append(PipelineStage(stage_id, _stage_kind(node), (node,), node.endpoint,
+                                        node.variable, node.location))
     metadata_nodes = {dependency.NodeKind.CONTROL, dependency.NodeKind.ENABLE, dependency.NodeKind.WRAPPER}
     if any(node.kind not in metadata_nodes and node.id not in stage_ids for node in graph.nodes):
         raise PipelineSynthesisError('dependency graph contains an unsupported node kind')

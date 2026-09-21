@@ -245,6 +245,14 @@ class BoundTemplateParameterBinding:
 
 
 @dataclass(frozen=True)
+class BoundVariableBinding:
+    """A Phase 7A-resolved variable value carried by one payload signal."""
+
+    variable: behavioral.Variable
+    signal_id: str
+
+
+@dataclass(frozen=True)
 class BoundModulePort:
     """An exact top-level SystemVerilog port already resolved by Phase 7A."""
 
@@ -296,6 +304,8 @@ class BoundBodyStage:
     endpoint: behavioral.ChannelEndpoint | None = None
     variable: behavioral.Variable | None = None
     location: behavioral.SourceLocation | None = None
+    upstream_boundary: dependency.DependencyNode | None = None
+    downstream_boundary: dependency.DependencyNode | None = None
 
 
 @dataclass(frozen=True)
@@ -333,6 +343,7 @@ class BoundStructuralGraph:
     signals: tuple[BoundLogicalSignal, ...]
     port_bindings: tuple[BoundPortBinding, ...]
     parameter_bindings: tuple[BoundTemplateParameterBinding, ...] = ()
+    variable_bindings: tuple[BoundVariableBinding, ...] = ()
     parameters: tuple[behavioral.Parameter, ...] = ()
     module_ports: tuple[BoundModulePort, ...] = ()
 
@@ -601,8 +612,10 @@ def _bind_stage_topology(graph: microarchitecture.MicroarchitectureGraph, bindin
 
 
 def _bind_unconditional_external_operations(graph: microarchitecture.MicroarchitectureGraph,
-                                            bindings: _Bindings, module_ports: _ModulePorts) -> dict[str, BoundLogicalSignal]:
-    payloads: dict[str, BoundLogicalSignal] = {}
+                                            bindings: _Bindings, module_ports: _ModulePorts) -> tuple[
+                                                dict[str, BoundLogicalSignal], dict[str, BoundLogicalSignal]]:
+    receive_payloads: dict[str, BoundLogicalSignal] = {}
+    send_payloads: dict[str, BoundLogicalSignal] = {}
     for stage in graph.stages:
         for node in stage.body_operations:
             operation = node.operation
@@ -619,7 +632,7 @@ def _bind_unconditional_external_operations(graph: microarchitecture.Microarchit
                                                 operation.channel.payload_type, operation.location, variable=target)
                 bindings.bind(stage.id, 'upstream_req', request)
                 bindings.bind(stage.id, 'upstream_ack', acknowledge)
-                payloads[stage.id] = payload
+                receive_payloads[stage.id] = payload
             if isinstance(operation, behavioral.Send):
                 variable, expression = _operation_payload(operation)
                 request = module_ports.external(operation.channel, 'send', ModulePortRole.REQUEST,
@@ -634,8 +647,8 @@ def _bind_unconditional_external_operations(graph: microarchitecture.Microarchit
                                                 variable=variable)
                 bindings.bind(stage.id, 'downstream_req', request)
                 bindings.bind(stage.id, 'downstream_ack', acknowledge)
-                payloads[stage.id] = payload
-    return payloads
+                send_payloads[stage.id] = payload
+    return receive_payloads, send_payloads
 
 
 def _bind_wrapper_ports(graph: microarchitecture.MicroarchitectureGraph, bindings: _Bindings,
@@ -706,7 +719,8 @@ def _bind_wrapper_ports(graph: microarchitecture.MicroarchitectureGraph, binding
 
 def _bind_storage_and_delays(stages: tuple[BoundBodyStage, ...], wrappers: tuple[BoundWrapper, ...],
                              bindings: _Bindings,
-                             external_payloads: dict[str, BoundLogicalSignal],
+                             receive_payloads: dict[str, BoundLogicalSignal],
+                             send_payloads: dict[str, BoundLogicalSignal],
                              wrapper_send_payloads: dict[str, tuple[BoundLogicalSignal, behavioral.Expression]]) -> None:
     wrapper_endpoints = {wrapper.attached_to: wrapper.endpoint for wrapper in wrappers}
     for stage in stages:
@@ -714,6 +728,13 @@ def _bind_storage_and_delays(stages: tuple[BoundBodyStage, ...], wrappers: tuple
         if stage.storage:
             payload_type = _payload_type(stage.variable, stage.endpoint or wrapper_endpoints.get(stage.id))
             variable = stage.variable
+            operations = tuple(node.operation for node in stage.operations)
+            receive_operation = next((operation for operation in operations
+                                      if isinstance(operation, behavioral.Receive)), None)
+            send_operation = next((operation for operation in operations
+                                   if isinstance(operation, behavioral.Send)), None)
+            assignment = next((operation for operation in reversed(operations)
+                               if isinstance(operation, behavioral.Assign)), None)
             operation = stage.operations[0].operation if stage.operations else None
             wrapper_payload = wrapper_send_payloads.get(stage.id)
             if wrapper_payload is not None:
@@ -724,12 +745,20 @@ def _bind_storage_and_delays(stages: tuple[BoundBodyStage, ...], wrappers: tuple
                     f'{stage.storage.id}_data_in', PortSemanticKind.PAYLOAD, source_stage=stage.id,
                     variable=variable, expression=expression, payload_type=payload_type, location=stage.location,
                 ))
-            elif isinstance(operation, behavioral.Receive):
-                data_in = external_payloads.get(stage.id)
+            elif assignment is not None:
+                variable, expression = _operation_payload(assignment)
+                if expression is None:
+                    raise TemplateBindingError(f'{stage.id} assignment has no explicit datapath source')
+                data_in = bindings.signal(BoundLogicalSignal(
+                    f'{stage.storage.id}_data_in', PortSemanticKind.PAYLOAD, source_stage=stage.id,
+                    variable=variable, expression=expression, payload_type=payload_type, location=stage.location,
+                ))
+            elif receive_operation is not None:
+                data_in = receive_payloads.get(stage.id)
                 if data_in is None:
                     raise TemplateBindingError(f'{stage.id} receive has no external payload binding')
             else:
-                variable, expression = _operation_payload(operation)
+                variable, expression = _operation_payload(assignment or operation)
                 if expression is None:
                     raise TemplateBindingError(f'{stage.id} storage has no explicit datapath source')
                 data_in = bindings.signal(BoundLogicalSignal(
@@ -738,8 +767,8 @@ def _bind_storage_and_delays(stages: tuple[BoundBodyStage, ...], wrappers: tuple
                 ))
             if wrapper_payload is not None:
                 pass
-            elif isinstance(operation, behavioral.Send):
-                data_out = external_payloads.get(stage.id)
+            elif send_operation is not None:
+                data_out = send_payloads.get(stage.id)
                 if data_out is None:
                     raise TemplateBindingError(f'{stage.id} send has no external payload binding')
             else:
@@ -825,9 +854,69 @@ def _validate_template_parameter_bindings(
                 raise TemplateBindingError(f'{instance_id} is missing required parameter {parameter.name}')
 
 
+def _target_variable(operation: object | None) -> behavioral.Variable | None:
+    if isinstance(operation, (behavioral.Receive, behavioral.Assign)):
+        return operation.target if isinstance(operation.target, behavioral.Variable) else operation.target.variable
+    return None
+
+
+def _variable_bindings(stages: tuple[BoundBodyStage, ...], bindings: _Bindings,
+                       receive_payloads: dict[str, BoundLogicalSignal]) -> tuple[BoundVariableBinding, ...]:
+    """Bind grouped stage inputs and stored Assign results to lexical variables."""
+    result: list[BoundVariableBinding] = []
+    seen: set[behavioral.Variable] = set()
+    for stage in stages:
+        if stage.storage is None or not stage.operations:
+            continue
+        for node in stage.operations:
+            if not isinstance(node.operation, behavioral.Receive):
+                continue
+            variable = _target_variable(node.operation)
+            payload = receive_payloads.get(stage.id)
+            if variable is None or payload is None:
+                raise TemplateBindingError(f'{stage.id} receive has no payload variable binding')
+            if variable in seen:
+                raise TemplateBindingError(f'variable {variable.name} has multiple payload definitions')
+            seen.add(variable)
+            result.append(BoundVariableBinding(variable, payload.id))
+        assignment = next((node.operation for node in reversed(stage.operations)
+                           if isinstance(node.operation, behavioral.Assign)), None)
+        variable = _target_variable(assignment)
+        if variable is not None:
+            if variable in seen:
+                raise TemplateBindingError(f'variable {variable.name} has multiple payload definitions')
+            data_out = next((item for item in bindings.bindings
+                             if item.instance_id == stage.storage.id and item.port_name == 'data_out'), None)
+            if data_out is None:
+                raise TemplateBindingError(f'{stage.storage.id} has no payload output binding')
+            seen.add(variable)
+            result.append(BoundVariableBinding(variable, data_out.signal_id))
+    return tuple(result)
+
+
+def _validate_variable_bindings(variable_bindings: tuple[BoundVariableBinding, ...],
+                                bindings: _Bindings) -> None:
+    signals = {signal.id: signal for signal in bindings.signals}
+    variables: set[behavioral.Variable] = set()
+    signal_ids: set[str] = set()
+    for variable_binding in variable_bindings:
+        if variable_binding.variable in variables:
+            raise TemplateBindingError(f'variable {variable_binding.variable.name} has duplicate signal bindings')
+        if variable_binding.signal_id in signal_ids:
+            raise TemplateBindingError(f'payload signal {variable_binding.signal_id} binds multiple variables')
+        signal = signals.get(variable_binding.signal_id)
+        if signal is None or signal.semantic_kind is not PortSemanticKind.PAYLOAD:
+            raise TemplateBindingError(f'variable {variable_binding.variable.name} has no payload signal binding')
+        if signal.width != variable_binding.variable.payload_type.width:
+            raise TemplateBindingError(f'variable {variable_binding.variable.name} has incompatible payload binding')
+        variables.add(variable_binding.variable)
+        signal_ids.add(variable_binding.signal_id)
+
+
 def _validate_bindings(stages: tuple[BoundBodyStage, ...], wrappers: tuple[BoundWrapper, ...],
                        bindings: _Bindings,
                        parameter_bindings: tuple[BoundTemplateParameterBinding, ...],
+                       variable_bindings: tuple[BoundVariableBinding, ...],
                        module_parameters: tuple[behavioral.Parameter, ...]) -> None:
     contracts = {stage.id: stage.contract for stage in stages}
     contracts.update({wrapper.id: wrapper.contract for wrapper in wrappers})
@@ -864,6 +953,7 @@ def _validate_bindings(stages: tuple[BoundBodyStage, ...], wrappers: tuple[Bound
             if count < port.minimum or (port.maximum is not None and count > port.maximum):
                 raise TemplateBindingError(f'{instance_id}.{port.name} has {count} bindings outside its contract')
     _validate_template_parameter_bindings(contracts, parameter_bindings, module_parameters)
+    _validate_variable_bindings(variable_bindings, bindings)
 
 
 def _resolve_driver_ownership(signals: tuple[BoundLogicalSignal, ...],
@@ -928,6 +1018,8 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
         endpoint=stage.endpoint,
         variable=stage.variable,
         location=stage.location,
+        upstream_boundary=stage.upstream_boundary,
+        downstream_boundary=stage.downstream_boundary,
     ) for stage in graph.stages)
     wrappers = tuple(BoundWrapper(
         id=wrapper.id,
@@ -949,10 +1041,11 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
     module_ports = _ModulePorts(bindings)
     handshakes = _handshake_signals(graph, bindings)
     _bind_stage_topology(graph, bindings, handshakes)
-    external_payloads = _bind_unconditional_external_operations(graph, bindings, module_ports)
+    receive_payloads, send_payloads = _bind_unconditional_external_operations(graph, bindings, module_ports)
     wrapper_send_payloads = _bind_wrapper_ports(graph, bindings, module_ports,
                                                 {stage.id: stage for stage in body_stages})
-    _bind_storage_and_delays(body_stages, wrappers, bindings, external_payloads, wrapper_send_payloads)
+    _bind_storage_and_delays(body_stages, wrappers, bindings, receive_payloads, send_payloads,
+                             wrapper_send_payloads)
     parameter_bindings = tuple(
         BoundTemplateParameterBinding(
             stage.storage.id,
@@ -961,7 +1054,8 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
         )
         for stage in body_stages if stage.storage is not None
     )
-    _validate_bindings(body_stages, wrappers, bindings, parameter_bindings, graph.parameters)
+    variable_bindings = _variable_bindings(body_stages, bindings, receive_payloads)
+    _validate_bindings(body_stages, wrappers, bindings, parameter_bindings, variable_bindings, graph.parameters)
     resolved_signals = _resolve_driver_ownership(tuple(bindings.signals), tuple(bindings.bindings), contracts,
                                                   tuple(module_ports.ports))
     dependencies = tuple(BoundStructuralDependency(
@@ -969,5 +1063,5 @@ def bind_templates(graph: microarchitecture.MicroarchitectureGraph) -> BoundStru
     ) for edge in graph.dependencies)
     return BoundStructuralGraph(graph.module, TEMPLATE_CONTRACTS, body_stages, wrappers, dependencies,
                                 graph.metadata, resolved_signals, tuple(bindings.bindings), parameter_bindings,
-                                graph.parameters,
+                                variable_bindings, graph.parameters,
                                 tuple(sorted(module_ports.ports, key=lambda port: port.name)))

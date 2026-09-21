@@ -24,7 +24,7 @@ from .microarchitecture_ir import (
     MicroarchitectureStage, MicroarchitectureWrapper, StorageRequirement, select_microarchitecture,
 )
 from .template_binding import (
-    BoundBodyStage, BoundLogicalSignal, BoundMatchedDelay, BoundPortBinding, BoundStorage,
+    BoundBodyStage, BoundLogicalSignal, BoundMatchedDelay, BoundPortBinding, BoundStorage, BoundVariableBinding,
     BoundTemplateParameterBinding,
     BoundModulePort, BoundStructuralDependency, BoundStructuralGraph, BoundWrapper, ModulePortRole,
     BoundSignalDriver, PortDirection, PortSemanticKind, SignalDriverKind,
@@ -32,6 +32,7 @@ from .template_binding import (
     bind_templates, template_contract,
 )
 from .rtl_codegen import RTLCodegenError, emit_systemverilog
+from .linear_compiler import LinearCompilationError, compile_linear_file
 
 __all__ = [
     "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
@@ -47,11 +48,12 @@ __all__ = [
     "ControllerKind", "HandshakePort", "MatchedDelayRequirement", "MicroarchitectureDependency",
     "MicroarchitectureError", "MicroarchitectureGraph", "MicroarchitectureMetadata",
     "MicroarchitectureStage", "MicroarchitectureWrapper", "StorageRequirement", "select_microarchitecture",
-    "BoundBodyStage", "BoundLogicalSignal", "BoundMatchedDelay", "BoundPortBinding", "BoundStorage",
+    "BoundBodyStage", "BoundLogicalSignal", "BoundMatchedDelay", "BoundPortBinding", "BoundStorage", "BoundVariableBinding",
     "BoundTemplateParameterBinding",
     "BoundModulePort", "BoundStructuralDependency", "BoundStructuralGraph", "BoundWrapper", "ModulePortRole",
     "BoundSignalDriver", "PortDirection", "PortSemanticKind", "SignalDriverKind",
     "StructuralTemplate", "TEMPLATE_CONTRACTS", "TemplateBindingError", "TemplateContract", "TemplateParameter", "TemplatePort",
     "bind_templates", "template_contract",
     "RTLCodegenError", "emit_systemverilog",
+    "LinearCompilationError", "compile_linear_file",
 ]

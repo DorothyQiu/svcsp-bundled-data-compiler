@@ -51,9 +51,9 @@ if (c) A.Send(x); endmodule''')
 def test_unconditional_communication_remains_linear():
     graph = implement('''module m(interface A, B); logic x; always begin
 A.Receive(x); B.Send(x); end endmodule''')
-    assert [stage(graph, label).controller for label in ('receive', 'send')] == [
-        ControllerKind.LINEAR, ControllerKind.LINEAR,
-    ]
+    assert len(graph.stages) == 1
+    assert graph.stages[0].controller is ControllerKind.LINEAR
+    assert [node.label for node in graph.stages[0].body_operations] == ['receive', 'send']
 
 
 def test_parallel_join_topology_is_preserved():
@@ -78,8 +78,9 @@ if (c) A[1].Receive(x); endmodule''')
 def test_shadowed_variable_identity_is_preserved_by_microarchitecture_stage():
     graph = implement('''module m(interface A, B); logic x; always begin
 begin logic x; A.Receive(x); end B.Send(x); end endmodule''')
-    receive, send = stage(graph, 'receive'), stage(graph, 'send')
-    assert receive.variable != send.body_operations[0].operation.value.variable
+    assert len(graph.stages) == 1
+    receive, send = graph.stages[0].body_operations
+    assert receive.variable != send.operation.value.variable
 
 
 def test_datapath_stage_storage_and_matched_delay_remain_symbolic():

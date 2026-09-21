@@ -116,6 +116,28 @@ def _instance_parameter_bindings(
     return {instance_id: tuple(items) for instance_id, items in grouped.items()}
 
 
+def _variable_signal_bindings(
+        graph: binding.BoundStructuralGraph,
+        signals: dict[str, binding.BoundLogicalSignal],
+) -> dict[behavioral.Variable, str]:
+    """Validate and return Phase 7A's explicit variable-to-payload mapping."""
+    result: dict[behavioral.Variable, str] = {}
+    used_signals: set[str] = set()
+    for item in graph.variable_bindings:
+        signal = signals.get(item.signal_id)
+        if item.variable in result:
+            raise RTLCodegenError(f'variable {item.variable.name} has duplicate payload bindings')
+        if item.signal_id in used_signals:
+            raise RTLCodegenError(f'payload signal {item.signal_id} binds multiple variables')
+        if signal is None or signal.semantic_kind is not binding.PortSemanticKind.PAYLOAD:
+            raise RTLCodegenError(f'variable {item.variable.name} has no payload signal binding')
+        if signal.width != item.variable.payload_type.width:
+            raise RTLCodegenError(f'variable {item.variable.name} has incompatible payload binding')
+        result[item.variable] = item.signal_id
+        used_signals.add(item.signal_id)
+    return result
+
+
 def _validate(graph: binding.BoundStructuralGraph) -> dict[str, binding.BoundLogicalSignal]:
     if not isinstance(graph, binding.BoundStructuralGraph):
         raise RTLCodegenError('expected a BoundStructuralGraph')
@@ -142,6 +164,7 @@ def _validate(graph: binding.BoundStructuralGraph) -> dict[str, binding.BoundLog
         parameter_names.add(parameter.name)
 
     _instance_parameter_bindings(graph, instance_contracts)
+    _variable_signal_bindings(graph, signals)
 
     for signal in graph.signals:
         if signal.semantic_kind is binding.PortSemanticKind.PAYLOAD:
@@ -211,7 +234,11 @@ def _validate(graph: binding.BoundStructuralGraph) -> dict[str, binding.BoundLog
             count = counts[(instance_id, port.name)]
             if count < port.minimum or (port.maximum is not None and count > port.maximum):
                 raise RTLCodegenError(f'missing or excess required binding for {instance_id}.{port.name}')
+    # A top-level input payload can feed a symbolic BODY expression through
+    # Phase 7A's explicit variable binding, without appearing on a template
+    # port directly.  That is still an already-bound external connection.
     used_signal_ids = {item.signal_id for item in graph.port_bindings}
+    used_signal_ids.update(item.signal_id for item in graph.variable_bindings)
     if any(port.signal_id not in used_signal_ids for port in graph.module_ports):
         raise RTLCodegenError('module port has no external-channel binding')
     return signals
@@ -367,9 +394,11 @@ def emit_systemverilog(graph: binding.BoundStructuralGraph) -> str:
                     else names.allocate('sig', signal.id))
         for signal in graph.signals
     }
+    variable_signal_bindings = _variable_signal_bindings(graph, signals)
     variable_names = {
-        variable: names.allocate('var', f'{variable.name}_{variable.scope}_{variable.location.file}_'
-                                 f'{variable.location.line}_{variable.location.column}')
+        variable: (signal_names[variable_signal_bindings[variable]] if variable in variable_signal_bindings else
+                   names.allocate('var', f'{variable.name}_{variable.scope}_{variable.location.file}_'
+                                         f'{variable.location.line}_{variable.location.column}'))
         for variable in _variables(graph)
     }
     instance_names = {
@@ -399,6 +428,8 @@ def emit_systemverilog(graph: binding.BoundStructuralGraph) -> str:
         lines.append(f'  {port.direction.value} logic{_width_declaration(signal, parameter_by_source_name)} {port.name};')
 
     for variable, name in variable_names.items():
+        if variable in variable_signal_bindings:
+            continue
         width = variable.payload_type.width
         temporary = binding.BoundLogicalSignal(f'variable_{name}', binding.PortSemanticKind.PAYLOAD,
                                                 payload_type=variable.payload_type, width=width)

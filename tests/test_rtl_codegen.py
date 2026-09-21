@@ -135,8 +135,10 @@ begin logic x; A.Receive(x); end B.Send(x); end endmodule''')
     assert 'A[0]' not in selected and 'A[1]' not in selected
     assert selected.count('conditional_send_wrapper') == 2
     variable_lines = [line for line in shadowed.splitlines() if line.startswith('  logic') and ' var_x_' in line]
-    assert len(variable_lines) == 2
-    assert len(set(variable_lines)) == 2
+    # The inner Receive target is explicitly bound to the A module payload;
+    # only the independent outer variable needs a declaration.
+    assert len(variable_lines) == 1
+    assert 'channel_B_send_payload' in shadowed
 
 
 def test_receive_and_send_endpoints_have_explicit_directional_module_ports():

@@ -3,9 +3,12 @@
 Phase 5 consumes a `DependencyGraph` with `synthesize_pipeline(graph)` and
 returns a syntax-independent `PipelineGraph`.
 
-Every Phase 4 `OPERATION` becomes one `PipelineStage`; the `operations` tuple
-allows later optimization to merge combinational operations without changing
-the representation. Every `PARALLEL_JOIN` becomes a `JOIN` stage. `CONTROL`
+For the supported unconditional linear form, one `Receive; Assign*; Send`
+transaction becomes one `PipelineStage`: Receive and Send are explicit
+upstream/downstream boundary metadata, and the Assign operations remain the
+stage's combinational BODY datapath. Other Phase 4 `OPERATION` nodes retain
+the conservative one-node-per-stage representation. Every `PARALLEL_JOIN`
+becomes a `JOIN` stage. `CONTROL`
 and `ENABLE` nodes remain metadata constraints and do not become datapath
 stages.
 
