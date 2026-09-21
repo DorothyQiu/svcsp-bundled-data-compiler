@@ -13,6 +13,10 @@ from .dependency_analysis import (
     DependencyAnalysisError, DependencyEdge, DependencyGraph, DependencyKind,
     DependencyNode, NodeKind, analyze_dependencies,
 )
+from .pipeline_synthesis import (
+    PipelineDependency, PipelineGraph, PipelineMetadata, PipelineStage, PipelineSynthesisError,
+    StageKind, WrapperAttachment, synthesize_pipeline,
+)
 
 __all__ = [
     "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
@@ -23,4 +27,6 @@ __all__ = [
     "normalize_communication", "parse_file", "parse_text",
     "DependencyAnalysisError", "DependencyEdge", "DependencyGraph", "DependencyKind",
     "DependencyNode", "NodeKind", "analyze_dependencies",
+    "PipelineDependency", "PipelineGraph", "PipelineMetadata", "PipelineStage", "PipelineSynthesisError",
+    "StageKind", "WrapperAttachment", "synthesize_pipeline",
 ]
