@@ -9,6 +9,35 @@ def lower(source, filename='behavior.sv'):
     return lower_behavioral(parse_text(source, filename))
 
 
+def test_standalone_receive_lowers_to_receive():
+    ir = lower('module m(interface C); logic x; always C.Receive(x); endmodule')
+    assert isinstance(ir.body, Receive)
+    assert ir.body.channel.name == 'C'
+    assert ir.body.target.name == 'x'
+
+
+def test_standalone_send_lowers_to_send():
+    ir = lower('module m(interface C); logic x; always C.Send(x); endmodule')
+    assert isinstance(ir.body, Send)
+    assert ir.body.channel.name == 'C'
+    assert ir.body.value.value == 'x'
+
+
+def test_standalone_assignment_lowers_to_assign():
+    ir = lower('module m; logic x; always x = x; endmodule')
+    assert isinstance(ir.body, Assign)
+    assert ir.body.target.name == 'x'
+    assert ir.body.value.value == 'x'
+
+
+def test_sequential_communications_remain_in_source_order():
+    ir = lower('''module m(interface A, B); logic x; always begin
+A.Receive(x); B.Send(x); end endmodule''')
+    assert isinstance(ir.body, Sequence)
+    assert [type(item) for item in ir.body.items] == [Receive, Send]
+    assert [item.channel.name for item in ir.body.items] == ['A', 'B']
+
+
 def test_sequential_receive_assign_send():
     ir = lower('''module m(interface L, R); logic data, increment; always begin
 L.Receive(data); data = data + increment; R.Send(data); end endmodule''')

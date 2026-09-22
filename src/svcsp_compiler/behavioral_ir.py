@@ -1,4 +1,4 @@
-"""Phase 2: syntax-independent Behavioral CSP IR and frontend lowering.
+"""Syntax-independent Behavioral CSP IR and frontend lowering.
 
 This phase preserves source-level process behavior.  It deliberately makes no
 normalization or implementation decisions.
@@ -436,10 +436,10 @@ def _statement(node: dict, scope: dict[str, Variable],
 
 
 def lower_behavioral(frontend: dict) -> BehavioralModule:
-    """Lower a successful Phase 1 frontend report into Behavioral CSP IR."""
+    """Lower a successful frontend result into Behavioral CSP IR."""
     required = {'module', 'always', 'channels', 'variables'}
     if not required <= frontend.keys():
-        raise BehavioralIRError('expected a Phase 1 frontend result')
+        raise BehavioralIRError('expected a frontend result')
     variables = tuple(
         Variable(variable['name'], tuple(variable['scope']), _location(variable), _payload_type(variable.get('payload_type')))
         for variable in frontend['variables']
