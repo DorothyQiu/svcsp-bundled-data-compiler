@@ -89,6 +89,38 @@ def test_block_variables_and_scope():
     assert directions(result) == {'C': 'input'}
 
 
+def test_source_locations_are_preserved_for_representative_semantics():
+    result = parse_text('''module m #(parameter int W = 8) (Channel #(W) C);
+logic [W-1:0] x;
+always begin
+  C.Send(x);
+end
+endmodule
+''', 'locations.sv')
+    assert result['location'] == {'file': 'locations.sv', 'line': 1, 'column': 1}
+    assert result['parameters'][0]['location'] == {'file': 'locations.sv', 'line': 1, 'column': 26}
+    assert result['channels'][0]['location'] == {'file': 'locations.sv', 'line': 1, 'column': 47}
+    assert result['variables'][0]['location'] == {'file': 'locations.sv', 'line': 2, 'column': 15}
+    assert result['always']['location'] == {'file': 'locations.sv', 'line': 3, 'column': 1}
+    assert result['always']['statement']['location'] == {'file': 'locations.sv', 'line': 3, 'column': 8}
+    assert result['operations'][0]['location'] == {'file': 'locations.sv', 'line': 4, 'column': 3}
+
+
+def test_supported_selected_unary_binary_conditional_and_concatenation_expression():
+    result = parse_text('''module m(interface C); logic [7:0] a, b; logic select; always
+C.Send(select ? ~a[0] : {a[3:0], b[3:0]} + b[7:0]); endmodule''')
+    expression = result['operations'][0]['argument']
+    assert expression['kind'] == 'ConditionalExpression'
+    assert expression['left']['kind'] == 'UnaryBitwiseNotExpression'
+    assert expression['left']['operand']['kind'] == 'IdentifierSelectName'
+    assert expression['right']['kind'] == 'AddExpression'
+    assert expression['right']['left']['kind'] == 'ConcatenationExpression'
+    assert [item['kind'] for item in expression['right']['left']['expressions']] == [
+        'IdentifierSelectName', 'IdentifierSelectName'
+    ]
+    assert expression['right']['right']['kind'] == 'IdentifierSelectName'
+
+
 @pytest.mark.parametrize('source, message', [
     ('module m; endmodule', 'exactly one top-level always'),
     ('module m; always begin end always begin end endmodule', 'exactly one top-level always'),
@@ -96,8 +128,8 @@ def test_block_variables_and_scope():
     ('module m; initial ; endmodule', 'module member'),
     ('module m; logic x; always x <= 1; endmodule', 'blocking assignment'),
     ('module m; always fork ; join_any endmodule', 'only fork/join'),
-    ('module m; always #1; endmodule', 'unsupported Phase 1 statement'),
-    ('module m; always forever ; endmodule', 'unsupported Phase 1 statement'),
+    ('module m; always #1; endmodule', 'unsupported frontend statement'),
+    ('module m; always forever ; endmodule', 'unsupported frontend statement'),
     ('module m(interface C); logic x; always C.send(x); endmodule', 'declared channel'),
     ('module m(interface C); logic x; always C.Send(); endmodule', 'one positional'),
     ('module m(interface C); logic x; always C.Receive(1); endmodule', 'target'),

@@ -1,4 +1,4 @@
-"""Phase 1: source syntax and module-local SVCSP semantic extraction.
+"""Frontend source syntax and module-local SVCSP semantic extraction.
 
 No elaboration, width evaluation, behavioral IR, or architectural lowering.
 All results are JSON-compatible dictionaries; syntax retains pyslang kind names.
@@ -14,10 +14,10 @@ from pyslang.syntax import SyntaxTree
 
 
 class FrontendError(ValueError):
-    """Invalid source or a construct outside the Phase 1 subset."""
+    """Invalid source or a construct outside the supported frontend subset."""
 
 
-# Phase 1 accepts only ordinary, side-effect-free data expressions.  Keep this
+# The frontend accepts only ordinary, side-effect-free data expressions. Keep this
 # explicit: pyslang represents some special names (for example ``$random`` and
 # ``this``) as leaf nodes, so a blacklist of calls and assignments is not
 # sufficient to reject them.
@@ -348,7 +348,7 @@ def _extract(tree, channel_types):
             operations.append(operation)
             endpoints[name]['operations'].append(operation)
         else:
-            _fail(node, f'unsupported Phase 1 statement: {kind}')
+            _fail(node, f'unsupported frontend statement: {kind}')
 
     processes = []
     for member in module.get('members', []):
@@ -357,7 +357,7 @@ def _extract(tree, channel_types):
         elif member['kind'] == 'AlwaysBlock':
             processes.append(member)
         else:
-            _fail(member, f"unsupported Phase 1 module member: {member['kind']}")
+            _fail(member, f"unsupported frontend module member: {member['kind']}")
     for channel in channels:
         for dimension in channel['dimensions']:
             expression(dimension, symbols)
