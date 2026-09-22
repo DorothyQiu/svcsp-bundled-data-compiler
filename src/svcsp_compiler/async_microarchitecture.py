@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from . import behavioral_ir as behavioral
-from .communication_decomposition import BodyReceive, BodySend, EnReceive, EnSend
+from .communication_decomposition import BodyReceive, BodySend, Enable, EnReceive, EnSend, InvalidPayload
 from .semantic_analysis import SemanticallyValidatedTransaction
 from .transaction import RegionOperation
 
@@ -16,6 +16,15 @@ class HandshakeProtocol(str, Enum):
 
 class TimingModel(str, Enum):
     BUNDLED_DATA = 'bundled_data'
+
+
+class BufferStyle(str, Enum):
+    HALF_BUFFER = 'half_buffer'
+
+
+class EnableAvailability(str, Enum):
+    PRE_INPUT = 'pre_input'
+    POST_INPUT = 'post_input'
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,37 @@ class CombinationalBlock:
 class OutputPort:
     body_send: BodySend
     en_send: EnSend | None
+
+
+@dataclass(frozen=True)
+class EnableChannel:
+    """One concrete one-bit transport for one M4 logical Enable occurrence."""
+
+    id: str
+    enable: Enable
+    width: behavioral.PayloadWidth
+    availability: EnableAvailability
+
+
+@dataclass(frozen=True)
+class EnReceiveStage:
+    """The pre-input stage that turns an enable token into one BODY input token."""
+
+    en_receive: EnReceive
+    enable_channel: EnableChannel
+    body_receive: BodyReceive
+    input_port: InputPort
+    disabled_payload: InvalidPayload
+
+
+@dataclass(frozen=True)
+class EnSendStage:
+    """The post-input stage that always consumes BODY output and may suppress I/O."""
+
+    en_send: EnSend
+    enable_channel: EnableChannel
+    body_send: BodySend
+    output_port: OutputPort
 
 
 @dataclass(frozen=True)
@@ -95,6 +135,10 @@ class AsyncMicroarchitecture:
     storage: StageStorage
     output_fork: OutputFork
     matched_delays: tuple[MatchedDelayRequirement, ...]
+    buffer_style: BufferStyle
+    enable_channels: tuple[EnableChannel, ...]
+    en_receive_stages: tuple[EnReceiveStage, ...]
+    en_send_stages: tuple[EnSendStage, ...]
 
 
 def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> AsyncMicroarchitecture:
@@ -118,6 +162,9 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
     ))
     combinational = CombinationalBlock(decomposed.body_combinational)
     matched_delays = _matched_delays(combinational.operations, storage, input_join)
+    enable_channels, en_receive_stages, en_send_stages = _enable_stages(decomposed.en_receives,
+                                                                          decomposed.en_sends,
+                                                                          inputs, outputs)
     return AsyncMicroarchitecture(
         validated,
         HandshakeProtocol.FOUR_PHASE,
@@ -127,7 +174,50 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
         storage,
         output_fork,
         matched_delays,
+        BufferStyle.HALF_BUFFER,
+        enable_channels,
+        en_receive_stages,
+        en_send_stages,
     )
+
+
+def _enable_stages(en_receives: tuple[EnReceive, ...], en_sends: tuple[EnSend, ...],
+                   inputs: tuple[InputPort, ...], outputs: tuple[OutputPort, ...]) -> tuple[
+                       tuple[EnableChannel, ...], tuple[EnReceiveStage, ...], tuple[EnSendStage, ...]]:
+    """Lower each M4 Enable occurrence independently, even for equal guards."""
+
+    channels: list[EnableChannel] = []
+    receive_stages: list[EnReceiveStage] = []
+    send_stages: list[EnSendStage] = []
+    input_by_receive = {input_port.body_receive: input_port for input_port in inputs}
+    output_by_send = {output_port.body_send: output_port for output_port in outputs}
+
+    for adapter in en_receives:
+        channel = EnableChannel(
+            f'enable_channel_{len(channels)}', adapter.enable, behavioral.ONE_BIT,
+            EnableAvailability.PRE_INPUT,
+        )
+        channels.append(channel)
+        body_receive = adapter.body_receive
+        disabled_payload = body_receive.disabled_payload
+        if disabled_payload is None:
+            raise ValueError('conditional Receive requires InvalidPayload semantics')
+        receive_stages.append(EnReceiveStage(
+            adapter, channel, body_receive, input_by_receive[body_receive], disabled_payload,
+        ))
+
+    for adapter in en_sends:
+        channel = EnableChannel(
+            f'enable_channel_{len(channels)}', adapter.enable, behavioral.ONE_BIT,
+            EnableAvailability.POST_INPUT,
+        )
+        channels.append(channel)
+        body_send = adapter.body_send
+        send_stages.append(EnSendStage(
+            adapter, channel, body_send, output_by_send[body_send],
+        ))
+
+    return tuple(channels), tuple(receive_stages), tuple(send_stages)
 
 
 def _matched_delays(combinational: tuple[RegionOperation, ...], storage: StageStorage,

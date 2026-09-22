@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from svcsp_compiler.async_microarchitecture import (
     AsyncMicroarchitecture,
+    BufferStyle,
     CombinationalBlock,
+    EnableAvailability,
+    EnableChannel,
+    EnReceiveStage,
+    EnSendStage,
     HandshakeProtocol,
     InputJoin,
     InputPort,
@@ -228,3 +233,98 @@ def test_lowering_preserves_exact_m5_m4_identities_without_pipeline_structure() 
     assert architecture.combinational.operations is validated.decomposed.body_combinational
     assert not hasattr(architecture, "pipeline")
     assert not hasattr(architecture, "stage_order")
+
+
+def test_architecture_explicitly_selects_half_buffer_style() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((program.receive("A", "a"), program.send("B", program.name("a")))))
+
+    assert architecture.buffer_style is BufferStyle.HALF_BUFFER
+
+
+def test_conditional_receive_has_a_pre_input_enable_channel_and_en_receive_stage() -> None:
+    program = _Program()
+    select = program.name("select")
+    receive = program.receive("A", "a")
+    validated = _validated(program, Sequence((
+        If(select, receive, Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+    architecture = lower_microarchitecture(validated)
+
+    body_receive = validated.decomposed.body_receives[0]
+    en_receive = validated.decomposed.en_receives[0]
+    assert len(architecture.enable_channels) == 2
+    channel = next(item for item in architecture.enable_channels if item.enable is en_receive.enable)
+    assert isinstance(channel, EnableChannel)
+    assert channel.enable is en_receive.enable
+    assert channel.width is ONE_BIT
+    assert channel.availability is EnableAvailability.PRE_INPUT
+    stage = next(item for item in architecture.en_receive_stages if item.en_receive is en_receive)
+    assert isinstance(stage, EnReceiveStage)
+    assert stage.enable_channel is channel
+    assert stage.body_receive is body_receive
+    assert stage.input_port is architecture.input_join.inputs[0]
+    assert stage.disabled_payload is body_receive.disabled_payload
+
+
+def test_conditional_send_has_a_post_input_enable_channel_and_en_send_stage() -> None:
+    program = _Program()
+    select = program.name("select")
+    send = program.send("B", Expression("literal", value="1'b0"))
+    validated = _validated(program, Sequence((
+        program.receive("A", "a"),
+        If(select, send, Skip()),
+    )))
+    architecture = lower_microarchitecture(validated)
+
+    body_send = validated.decomposed.body_sends[0]
+    en_send = validated.decomposed.en_sends[0]
+    channel = next(item for item in architecture.enable_channels if item.enable is en_send.enable)
+    assert isinstance(channel, EnableChannel)
+    assert channel.enable is en_send.enable
+    assert channel.width is ONE_BIT
+    assert channel.availability is EnableAvailability.POST_INPUT
+    stage = next(item for item in architecture.en_send_stages if item.en_send is en_send)
+    assert isinstance(stage, EnSendStage)
+    assert stage.enable_channel is channel
+    assert stage.body_send is body_send
+    assert stage.output_port is architecture.output_fork.outputs[0]
+
+
+def test_en_send_consumes_the_unconditional_body_output_without_dummy_payload_semantics() -> None:
+    program = _Program()
+    send = program.send("B", Expression("literal", value="1'b0"))
+    validated = _validated(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), send, Skip()),
+    )))
+    architecture = lower_microarchitecture(validated)
+
+    stage = architecture.en_send_stages[0]
+    assert stage.body_send is validated.decomposed.body_sends[0]
+    assert stage.output_port.body_send is stage.body_send
+    assert not hasattr(stage, "disabled_payload")
+    assert not hasattr(stage, "invalid_payload")
+
+
+def test_nested_and_multiple_conditional_communications_get_distinct_enable_channels() -> None:
+    program = _Program()
+    outer = program.name("outer")
+    inner = program.name("inner")
+    nested_receive = program.receive("A", "a")
+    nested_send = program.send("B", Expression("literal", value="1'b0"))
+    conditional_send = program.send("C", Expression("literal", value="1'b1"))
+    architecture = _lower(program, Sequence((
+        If(outer, If(inner, nested_receive, Skip()), Skip()),
+        If(outer, If(inner, nested_send, Skip()), Skip()),
+        If(outer, conditional_send, Skip()),
+    )))
+
+    enables = tuple(channel.enable for channel in architecture.enable_channels)
+    assert len(enables) == 3
+    assert len({id(enable) for enable in enables}) == 3
+    assert {channel.availability for channel in architecture.enable_channels} == {
+        EnableAvailability.PRE_INPUT,
+        EnableAvailability.POST_INPUT,
+    }
