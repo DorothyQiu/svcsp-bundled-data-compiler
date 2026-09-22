@@ -1,155 +1,210 @@
 # Project Goal
 
-Build an automated compiler from SystemVerilog CSP (SVCSP) behavioral
-descriptions to synthesizable structural bundled-data asynchronous RTL.
+Build a compiler from a supported subset of SystemVerilog CSP (SVCSP) to
+structural, synthesizable asynchronous RTL.
 
-This is not merely a SystemVerilog syntax translator.
+Initial backend target:
 
-# Compiler Architecture
+```text
+bundled-data + four-phase handshake
+```
 
-Primary compiler path:
+The target compiler architecture is defined by the documentation, not by legacy
+implementation structures.
 
-SVCSP
--> Phase 1 frontend / semantic analysis
--> Phase 2 Behavioral CSP IR
--> Phase 3 communication normalization
--> Phase 4 dependency analysis
--> Phase 5 pipeline synthesis
--> Phase 6 bundled-data microarchitecture IR
--> Phase 7A structural template binding
--> Phase 7B structural SystemVerilog emission
+# Target Source Model
 
-Phase 3 also has a verification/output branch:
+One supported top-level process represents one single-stage transaction:
 
-Phase 3 NormalizedModule
--> decomposed SVCSP emitter
--> BODY + SEND/RECV wrappers
--> original-vs-decomposed behavioral equivalence simulation
+```text
+N independent Channel Receive(s)
+              |
+              v
+      Combinational Logic
+              |
+              v
+M independent Channel Send(s)
+```
 
-Decomposed SVCSP is emitted from the SAME Phase 3 NormalizedModule.
-It is not a second IR and is never reparsed into the compiler backend.
+with `N >= 1` and `M >= 1`.
 
-# Key Design Rules
+Receive and Send operations may be unconditional or conditional.
 
-- Use Python for compiler implementation.
-- Use pyslang for SystemVerilog parsing.
-- Keep Behavioral CSP IR separate from bundled-data microarchitecture IR.
-- Each transformation is an explicit compiler pass.
-- Codegen must not make architecture decisions.
-- Preserve exact semantic identities instead of reconstructing relationships
-  from source locations.
-- Fail closed on unsupported or ambiguous cases.
-- Every phase requires focused pytest coverage.
-- Treat reference/ as read-only reference material.
+Multiple independent communications written sequentially are accepted and
+interpreted as concurrent, but the compiler should warn and recommend explicit
+`fork` / `join`.
 
-# Phase 3 Conditional Communication
+Explicit `fork` / `join` is the preferred concurrency form.
 
-Phase 3 uses explicit semantic objects:
+Reject communication that is not semantically independent.
 
-- CommunicationSite: source-order/control anchor for one conditional
-  communication occurrence.
-- Enable: symbolic condition identity.
-- BodyChannel: internal BODY-to-wrapper or wrapper-to-BODY token identity.
-- BodySend / BodyReceive: unconditional BODY-side communication.
-- NormalizedSend / NormalizedReceive: external wrapper semantics.
+# Target Compiler Flow
 
-CommunicationSite is not an executed BODY token operation and is not a Skip.
-Body communication semantics live in BodySend / BodyReceive.
+```text
+1. Frontend / Semantic Analysis
+2. Behavioral CSP IR
+3. Transaction Extraction + Structural Validation
+4. Conditional Communication Decomposition
+5. Dependency / Validity Analysis + Semantic Validation
+6. Asynchronous Microarchitecture Lowering
+7. Structural RTL Backend
+```
 
-Exact shared object identity connects a site, enable, BODY channel,
-BODY communication, and wrapper. Do not recover this relationship from
-source-location matching.
+This flow is authoritative.
 
-Nested guards may be composed symbolically by Phase 3.
+Existing code may contain legacy phase numbering, `PipelineGraph`,
+`synthesize_pipeline()`, wrapper terminology, or other structures from the
+previous design.
 
-The following describes the executable decomposed-SVCSP realization of the
-Phase 3 conditional communication semantics.
+Treat these as migration targets, not architectural requirements.
 
-# Conditional Receive Semantics
+Do not change the target specification merely to match legacy code.
 
-For each iteration, BODY produces an enable token and performs an
-unconditional BODY-side Receive.
+# Conditional Communication
 
-Enabled:
-- RECV wrapper consumes and acknowledges the external token.
-- Wrapper forwards the real data token to BODY.
-- BODY continues only after that BODY-side Receive completes.
+Source level:
 
-Disabled:
-- Wrapper must not consume or acknowledge the external channel.
-- Wrapper sends a dummy/invalid BODY-side token.
-- BODY still completes its unconditional Receive and continues.
-- Downstream use of disabled receive data must remain validity-guarded.
+```text
+conditional Receive
+conditional Send
+```
 
-# Conditional Send Semantics
+After decomposition:
 
-For each iteration, BODY produces an enable token and unconditionally sends
-one BODY-side data token to the SEND wrapper.
+```text
+BODY
+enable
+EN_RECV
+EN_SEND
+```
 
-Enabled:
-- wrapper consumes the BODY token;
-- wrapper completes the blocking external Send;
-- wrapper then sends a completion token back to BODY;
-- BODY continuation waits for that completion token.
+`enable` is an abstract control concept. Do not assume it must be a wire,
+Channel, or specific handshake mechanism.
 
-Disabled:
-- wrapper consumes the BODY token;
-- wrapper performs no external communication;
-- wrapper immediately sends the completion token;
-- BODY then continues.
+`BODY` is used only after decomposition and contains:
 
-The completion channel is required to preserve original blocking Send
-ordering. Internal BODY-token handoff alone is not external Send completion.
+```text
+unconditional Channel Receive(s)
+combinational logic
+unconditional Channel Send(s)
+enable generation
+```
 
-# Decomposed SVCSP Emitter Boundary
+For conditional Receive:
 
-Current decomposed-SVCSP support is intentionally narrower than Phase 3:
+```text
+enable = 1:
+    EN_RECV performs external Receive
+    BODY receives real data
 
-- one direct conditional Send: supported and simulation-equivalence tested;
-- one direct conditional Receive: supported and simulation-equivalence tested;
-- blocking order after conditional Send: regression tested;
-- multiple conditional sites in one module: currently fail closed;
-- repeated conditional operations on the same endpoint: fail closed;
-- nested conditional sites: fail closed in the emitter;
-- conditional communication in fork/join: fail closed in the emitter.
+enable = 0:
+    external Channel remains untouched
+    BODY receives dummy / invalid data
+```
 
-Phase 3 may represent more of these cases than the decomposed emitter supports.
+The BODY-side Receive is always unconditional.
 
-Production decomposed SVCSP remains Channel-based.
+For conditional Send:
 
-Icarus Verilog 12 cannot use SVCSP Channel interfaces as useful module ports,
-so behavioral-equivalence tests use a test-only mechanical Channel flattener
-to payload/request/acknowledge signals. This flattener is not compiler output
-and must not influence production SVCSP syntax or compiler architecture.
+```text
+enable = 1:
+    EN_SEND performs external Send
 
-# Phase 4 Ordering
+enable = 0:
+    EN_SEND suppresses external communication
+```
 
-Phase 4 dependency analysis is authoritative for source ordering.
+The BODY-side Send is always unconditional.
 
-Conditional wrappers connect to their exact CommunicationSite through
-COMMUNICATION edges. For conditional Send, continuation after the source Send
-is sequenced after wrapper completion, not merely after BODY-token handoff.
+# Validation Rules
 
-# Current RTL Boundary
+Fail closed on unsupported source.
 
-The executable bundled-data RTL MVP currently validates one unconditional
-linear Receive; Assign*; Send transaction as one BODY stage.
+Reject at least:
 
-Conditional communication and JOIN structures exist in compiler IRs but are
-not yet implemented as executable end-to-end RTL library support.
+```text
+Receive -> Send -> Receive
+Receive after computation begins
+dependent Receive
+repeated endpoint communication
+invalid use of conditionally received data
+other non-independent communication
+```
 
-# Repository Layout
+Do not silently reinterpret unsupported source.
 
-- src/svcsp_compiler/: compiler implementation
-- tests/: pytest tests
-- examples/: input SVCSP examples
-- docs/: architecture/specification
-- rtl_lib/: bundled-data RTL templates
-- reference/: read-only reference implementations
+# Compiler Rules
 
-# Development
+- Use `pyslang` for SystemVerilog parsing.
+- Keep parser representation separate from compiler-owned IR.
+- Preserve exact Channel, variable, expression, width, and source identities.
+- Do not silently resize, truncate, extend, or reinterpret payloads.
+- Keep hardware architecture decisions out of frontend and behavioral IR.
+- Keep RTL emission free of new architecture decisions.
+- Treat `reference/` as read-only reference material.
+- Add or update tests before modifying each compiler milestone.
 
-- Python >= 3.10
-- Run pytest -q after changes
-- Keep each change scoped to the requested phase
-- Do not commit until tests and requested review are complete
+# Development Order
+
+Work strictly in compiler-flow order:
+
+```text
+M1  Frontend / Semantic Analysis
+M2  Behavioral CSP IR
+M3  Transaction Extraction + Structural Validation
+M4  Conditional Communication Decomposition
+M5  Dependency / Validity + Semantic Validation
+M6  Asynchronous Microarchitecture Lowering
+M7  Structural RTL Backend
+```
+
+For each milestone:
+
+```text
+define expected behavior
+-> add/update tests
+-> modify implementation
+-> run regression
+-> proceed only when stable
+```
+
+Avoid redesigning later phases while an earlier milestone is still being
+migrated.
+
+# Authoritative Documentation
+
+Read only the relevant target-spec documents:
+
+```text
+docs/supported_architectures.md
+docs/compiler_flow.md
+docs/communication_decomposition.md
+docs/verification_plan.md
+```
+
+Use:
+
+- `supported_architectures.md` for accepted/rejected source structures;
+- `compiler_flow.md` for phase responsibilities;
+- `communication_decomposition.md` for EN_RECV / EN_SEND semantics;
+- `verification_plan.md` for milestone tests and completion criteria.
+
+# Development Commands
+
+```bash
+source .venv/bin/activate
+```
+
+On June:
+
+```bash
+export PATH=/home/cli78217/local/bin:$PATH
+pytest -q
+```
+
+Before committing:
+
+```bash
+git diff --check
+pytest -q
+```
