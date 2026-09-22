@@ -349,9 +349,9 @@ def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
 
     completion = next(instance for instance in bound.instances if instance.template == "four_phase_output_completion")
     completion_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, completion)}
-    assert {"complete", "stage_complete"} <= set(completion_bindings)
-    assert _actual_signal(bound, completion_bindings["stage_complete"]).kind == "control"
-    assert join_bindings["stage_release"].actual_signal_id == completion_bindings["stage_complete"].actual_signal_id
+    assert {"complete", "stage_release"} <= set(completion_bindings)
+    assert _actual_signal(bound, completion_bindings["stage_release"]).kind == "control"
+    assert join_bindings["stage_release"].actual_signal_id == completion_bindings["stage_release"].actual_signal_id
 
 
 def test_post_input_enable_is_not_an_output_fork_member_and_matched_delays_remain_typed() -> None:
@@ -457,10 +457,80 @@ def test_enable_payload_is_driven_by_its_exact_m4_condition_not_a_scalar_wire() 
 
     for channel in architecture.enable_channels:
         binding = _enable_channel_binding(bound, channel)
-        assert any(assignment.target_signal_id == binding.data_signal_id
+        sender_bindings = {item.formal_name: item for item in _bindings_for(bound, binding.body_sender)}
+        assert sender_bindings["value"].actual_signal_id == binding.value_signal_id
+        assert sender_bindings["data"].actual_signal_id == binding.data_signal_id
+        assert binding.value_signal_id != binding.data_signal_id
+        assert any(assignment.target_signal_id == binding.value_signal_id
                    and assignment.expression is channel.enable.condition
                    for assignment in bound.assignments)
+        assert not any(assignment.target_signal_id == binding.data_signal_id
+                       and assignment.expression is channel.enable.condition
+                       for assignment in bound.assignments)
         assert _actual_signal(bound, next(item for item in _bindings_for(bound, binding.body_sender)
                                           if item.formal_name == "req")).kind == "request"
         assert _actual_signal(bound, next(item for item in _bindings_for(bound, binding.body_sender)
                                           if item.formal_name == "ack")).kind == "acknowledge"
+
+
+def test_pre_input_enable_sender_has_a_dedicated_transaction_launch_and_value_path() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    channel = next(item for item in architecture.enable_channels if item.availability.value == "pre_input")
+    sender = _enable_channel_binding(bound, channel).body_sender
+    bindings = {item.formal_name: item for item in _bindings_for(bound, sender)}
+
+    assert sender.template == "four_phase_enable_sender"
+    assert set(bindings) == {"value", "launch", "req", "ack", "data"}
+    value = bindings["value"].actual_signal_id
+    launch = bindings["launch"].actual_signal_id
+    data = bindings["data"].actual_signal_id
+    join_bindings = {item.formal_name: item
+                     for item in _bindings_for(bound, _bound_for(bound, architecture.input_join))}
+    assert value != data
+    assert launch != join_bindings["control"].actual_signal_id
+    assert _actual_signal(bound, bindings["launch"]).kind == "control"
+    assert any(assignment.target_signal_id == value and assignment.expression is channel.enable.condition
+               for assignment in bound.assignments)
+    assert not any(assignment.target_signal_id == data and assignment.expression is channel.enable.condition
+                   for assignment in bound.assignments)
+    assert channel.producer.available_before_controlled_body_input is True
+    assert channel.producer.participates_in_transaction_completion is True
+    assert channel.producer.participates_in_body_completion is False
+
+
+def test_post_input_enable_sender_launches_with_body_and_adds_an_independent_completion_branch() -> None:
+    program = _Program()
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+    )))
+
+    channel = next(item for item in architecture.enable_channels if item.availability.value == "post_input")
+    sender = _enable_channel_binding(bound, channel).body_sender
+    bindings = {item.formal_name: item for item in _bindings_for(bound, sender)}
+    join = _bound_for(bound, architecture.input_join)
+    join_bindings = {item.formal_name: item for item in _bindings_for(bound, join)}
+    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
+    completion_bindings = {item.formal_name: item for item in _bindings_for(bound, completion)}
+
+    assert set(bindings) == {"value", "launch", "req", "ack", "data"}
+    assert bindings["launch"].actual_signal_id == join_bindings["control"].actual_signal_id
+    assert bindings["value"].actual_signal_id != bindings["data"].actual_signal_id
+    assert any(assignment.target_signal_id == bindings["value"].actual_signal_id
+               and assignment.expression is channel.enable.condition for assignment in bound.assignments)
+    assert channel.producer.depends_on_input_join is True
+    assert channel.producer.participates_in_body_completion is True
+
+    completion_vector = _actual_signal(bound, completion_bindings["complete"])
+    assert completion_vector.width.bits == 2
+    assert any(assignment.kind == "pack_output_completion" and assignment.source is channel
+               and assignment.target_signal_id == completion_bindings["complete"].actual_signal_id
+               for assignment in bound.assignments)
+    assert len({item.actual_signal_id for item in _bindings_for(bound, sender)
+                if item.formal_name == "launch"}) == 1

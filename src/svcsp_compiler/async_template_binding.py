@@ -106,6 +106,8 @@ class BoundEnableChannel:
     request_signal_id: str
     acknowledge_signal_id: str
     data_signal_id: str
+    value_signal_id: str
+    launch_signal_id: str
     body_sender: BoundAsyncInstance
 
 
@@ -294,30 +296,37 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
             raise AsyncTemplateBindingError(f"{instance.id}.{formal} has undeclared actual {actual}")
         bindings.append(BoundAsyncPortBinding(instance.id, formal, actual))
 
+    join = architecture.input_join
+    join_control = ensure("input_join_control", "control", behavioral.ONE_BIT)
+    stage_complete = ensure("stage_complete", "control", behavioral.ONE_BIT)
     enable_channel_bindings: list[BoundEnableChannel] = []
     enable_signals: dict[EnableChannel, tuple[str, str, str]] = {}
     for index, channel in enumerate(architecture.enable_channels):
+        value = ensure(f"enable_channel_{index}_value", "payload", behavioral.ONE_BIT)
         request = ensure(f"enable_channel_{index}_req", "request", behavioral.ONE_BIT)
         acknowledge = ensure(f"enable_channel_{index}_ack", "acknowledge", behavioral.ONE_BIT)
         data = ensure(f"enable_channel_{index}_data", "payload", behavioral.ONE_BIT)
+        launch = (
+            ensure(f"enable_channel_{index}_pre_input_launch", "control", behavioral.ONE_BIT)
+            if channel.availability.value == "pre_input" else join_control
+        )
         sender = by_source[channel.producer]
-        formals[sender.id] = ("req", "ack", "data")
+        formals[sender.id] = ("value", "launch", "req", "ack", "data")
+        bind(sender, "value", value)
+        bind(sender, "launch", launch)
         bind(sender, "req", request)
         bind(sender, "ack", acknowledge)
         bind(sender, "data", data)
-        assignments.append(BoundAsyncAssignment(data, channel.enable.condition, channel.enable,
-                                                "enable_payload"))
+        assignments.append(BoundAsyncAssignment(value, channel.enable.condition, channel.enable,
+                                                "enable_value"))
         enable_signals[channel] = request, acknowledge, data
         enable_channel_bindings.append(BoundEnableChannel(
             channel, channel, channel.availability,
             channel.producer.participates_in_transaction_completion,
-            request, acknowledge, data, sender,
+            request, acknowledge, data, value, launch, sender,
         ))
 
-    join = architecture.input_join
     join_instance = by_source[join]
-    join_control = ensure("input_join_control", "control", behavioral.ONE_BIT)
-    stage_complete = ensure("stage_complete", "control", behavioral.ONE_BIT)
     input_count = behavioral.PayloadWidth(bits=len(join.inputs))
     join_request = ensure("input_join_req", "request", input_count)
     join_acknowledge = ensure("input_join_ack", "acknowledge", input_count)
@@ -382,10 +391,10 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
         data_out = ensure(f"storage_{index}_data_out", "payload", payload.width, operation.channel)
         storage_data_in[slot] = data_in
         storage_data_out[slot] = data_out
-        formals[storage.id] = ("data_in", "data_out", "capture", "release")
+        formals[storage.id] = ("data_in", "data_out", "capture", "stage_release")
         parameters[storage.id] = ("WIDTH",)
         for formal, actual in (("data_in", data_in), ("data_out", data_out), ("capture", join_control),
-                               ("release", stage_complete)):
+                               ("stage_release", stage_complete)):
             bind(storage, formal, actual)
         parameter_bindings.append(BoundAsyncParameterBinding(storage.id, "WIDTH", payload.width))
         assignments.append(BoundAsyncAssignment(data_in, operation.value, slot.body_send, "body_send_payload"))
@@ -402,8 +411,15 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
     fork_instance = next(instance for instance in instances if instance.template == "four_phase_output_fork")
     completion_instance = next(instance for instance in instances if instance.template == "four_phase_output_completion")
     output_count = behavioral.PayloadWidth(bits=len(fork.outputs))
+    post_input_channels = tuple(channel for channel in architecture.enable_channels
+                                if channel.availability.value == "post_input")
+    completion_count = behavioral.PayloadWidth(bits=len(fork.outputs) + len(post_input_channels))
     fork_launch_vector = ensure("output_fork_launch", "request", output_count)
     fork_complete_vector = ensure("output_fork_complete", "completion", output_count)
+    completion_vector = (
+        fork_complete_vector if not post_input_channels else
+        ensure("stage_output_complete", "completion", completion_count)
+    )
     output_launch: dict[OutputPort, str] = {}
     output_complete: dict[OutputPort, str] = {}
     for index, output in enumerate(fork.outputs):
@@ -444,17 +460,21 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
                 bind(stage_instance, formal, actual)
         assignments.append(BoundAsyncAssignment(launch, None, output, "unpack_output_launch"))
         assignments.append(BoundAsyncAssignment(fork_complete_vector, None, output, "pack_output_completion"))
+        if post_input_channels:
+            assignments.append(BoundAsyncAssignment(completion_vector, None, output, "pack_output_completion"))
+    for channel in post_input_channels:
+        assignments.append(BoundAsyncAssignment(completion_vector, None, channel, "pack_output_completion"))
     formals[fork_instance.id] = ("launch", "complete", "stage_complete")
-    formals[completion_instance.id] = ("complete", "stage_complete")
+    formals[completion_instance.id] = ("complete", "stage_release")
     parameters[fork_instance.id] = ("M",)
     parameters[completion_instance.id] = ("M",)
     bind(fork_instance, "launch", fork_launch_vector)
     bind(fork_instance, "complete", fork_complete_vector)
-    bind(completion_instance, "complete", fork_complete_vector)
+    bind(completion_instance, "complete", completion_vector)
     bind(fork_instance, "stage_complete", stage_complete)
-    bind(completion_instance, "stage_complete", stage_complete)
+    bind(completion_instance, "stage_release", stage_complete)
     parameter_bindings.append(BoundAsyncParameterBinding(fork_instance.id, "M", output_count))
-    parameter_bindings.append(BoundAsyncParameterBinding(completion_instance.id, "M", output_count))
+    parameter_bindings.append(BoundAsyncParameterBinding(completion_instance.id, "M", completion_count))
 
     for requirement in architecture.matched_delays:
         delay = by_source[requirement]
