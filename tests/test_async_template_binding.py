@@ -76,6 +76,10 @@ def _actual_signal(bound: BoundAsyncModule, binding):
     return next(signal for signal in bound.signals if signal.id == binding.actual_signal_id)
 
 
+def _enable_channel_binding(bound: BoundAsyncModule, channel):
+    return next(item for item in bound.enable_channels if item.source is channel)
+
+
 def _assert_complete_typed_bindings(bound: BoundAsyncModule) -> None:
     declared_actuals = {signal.id for signal in bound.signals}
     declared_actuals.update(port.signal_id for port in bound.module_ports)
@@ -154,23 +158,77 @@ def test_2r2s_preserves_every_m6_input_output_and_storage_identity() -> None:
     assert {_bound_for(bound, slot).source for slot in architecture.storage.slots} == set(architecture.storage.slots)
 
 
-def test_conditional_receive_and_send_bind_their_exact_m4_adapters() -> None:
+def test_every_m6_enable_channel_binds_a_real_one_bit_four_phase_channel_and_body_sender() -> None:
     program = _Program()
     select = program.name("select")
-    receive = program.receive("A", "a")
-    send = program.send("B", program.name("a"))
     architecture, bound = _bind(program, Sequence((
-        If(select, receive, Skip()),
-        If(select, send, Skip()),
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
     )))
 
-    en_receive = architecture.input_join.inputs[0].en_receive
-    en_send = architecture.output_fork.outputs[0].en_send
-    assert en_receive is not None and en_send is not None
-    assert _bound_for(bound, en_receive).template == "en_receive"
-    assert _bound_for(bound, en_receive).source is en_receive
-    assert _bound_for(bound, en_send).template == "en_send"
-    assert _bound_for(bound, en_send).source is en_send
+    assert len(bound.enable_channels) == len(architecture.enable_channels) == 2
+    for channel in architecture.enable_channels:
+        binding = _enable_channel_binding(bound, channel)
+        assert binding.enable_channel is channel
+        assert binding.source is channel
+        assert binding.availability is channel.availability
+        assert binding.producer_completion is channel.producer.participates_in_transaction_completion
+        assert binding.body_sender.enable_channel is channel
+        assert binding.body_sender.source is channel.producer
+        request = next(signal for signal in bound.signals if signal.id == binding.request_signal_id)
+        acknowledge = next(signal for signal in bound.signals if signal.id == binding.acknowledge_signal_id)
+        data = next(signal for signal in bound.signals if signal.id == binding.data_signal_id)
+        assert request.kind == "request" and request.width.bits == 1
+        assert acknowledge.kind == "acknowledge" and acknowledge.width.bits == 1
+        assert data.kind == "payload" and data.width.bits == 1
+        if channel.availability.value == "pre_input":
+            assert channel not in architecture.output_fork.outputs
+
+
+def test_conditional_receive_binds_only_the_en_receive_microstage_to_external_and_body_paths() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    stage = architecture.en_receive_stages[0]
+    channel_binding = _enable_channel_binding(bound, stage.enable_channel)
+    instance = _bound_for(bound, stage)
+    bindings = {item.formal_name: item for item in _bindings_for(bound, instance)}
+    assert instance.template == "en_receive_stage"
+    assert {"enable_req", "enable_ack", "enable_data", "external_req", "external_ack", "external_data",
+            "body_req", "body_ack", "body_data"} == set(bindings)
+    assert bindings["enable_req"].actual_signal_id == channel_binding.request_signal_id
+    assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
+    assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
+    assert not any(item.source is stage.input_port and item.template == "four_phase_receive_port"
+                   for item in bound.instances)
+    assert bindings["body_req"].actual_signal_id in {
+        item.actual_signal_id for item in _bindings_for(bound, _bound_for(bound, architecture.input_join))
+    }
+
+
+def test_conditional_send_binds_only_the_en_send_microstage_to_external_and_body_paths() -> None:
+    program = _Program()
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), program.send("B", Expression("literal", value="1'b0")), Skip()),
+    )))
+
+    stage = architecture.en_send_stages[0]
+    channel_binding = _enable_channel_binding(bound, stage.enable_channel)
+    instance = _bound_for(bound, stage)
+    bindings = {item.formal_name: item for item in _bindings_for(bound, instance)}
+    assert instance.template == "en_send_stage"
+    assert {"enable_req", "enable_ack", "enable_data", "body_req", "body_ack", "body_data",
+            "external_req", "external_ack", "external_data"} == set(bindings)
+    assert bindings["enable_req"].actual_signal_id == channel_binding.request_signal_id
+    assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
+    assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
+    assert not any(item.source is stage.output_port and item.template == "four_phase_send_port"
+                   for item in bound.instances)
 
 
 def test_selected_endpoints_and_payload_widths_are_bound_without_reinterpretation() -> None:
@@ -235,7 +293,7 @@ def test_every_instance_has_complete_typed_formal_and_parameter_bindings() -> No
     assert width.value == _BYTE.width
 
 
-def test_conditional_en_receive_has_complete_external_and_body_handshake_bindings() -> None:
+def test_conditional_en_receive_uses_the_m6_microstage_and_enable_channel_bindings() -> None:
     program = _Program()
     select = program.name("select")
     conditional_receive = program.receive("A", "a")
@@ -244,21 +302,27 @@ def test_conditional_en_receive_has_complete_external_and_body_handshake_binding
         If(select, program.send("B", program.name("a")), Skip()),
     )))
 
-    adapter = architecture.input_join.inputs[0].en_receive
-    assert adapter is not None
-    instance = _bound_for(bound, adapter)
+    stage = architecture.en_receive_stages[0]
+    channel = _enable_channel_binding(bound, stage.enable_channel)
+    instance = _bound_for(bound, stage)
     bindings = {binding.formal_name: binding for binding in _bindings_for(bound, instance)}
     assert set(bindings) == {
-        "external_req", "external_ack", "external_data",
-        "body_req", "body_ack", "body_data", "enable",
+        "enable_req", "enable_ack", "enable_data",
+        "external_req", "external_ack", "external_data", "body_req", "body_ack", "body_data",
     }
+    assert instance.template == "en_receive_stage"
+    assert bindings["enable_req"].actual_signal_id == channel.request_signal_id
+    assert bindings["enable_ack"].actual_signal_id == channel.acknowledge_signal_id
+    assert bindings["enable_data"].actual_signal_id == channel.data_signal_id
     assert _actual_signal(bound, bindings["external_req"]).kind == "request"
     assert _actual_signal(bound, bindings["external_ack"]).kind == "acknowledge"
     assert _actual_signal(bound, bindings["external_data"]).kind == "payload"
     assert _actual_signal(bound, bindings["body_req"]).kind == "request"
     assert _actual_signal(bound, bindings["body_ack"]).kind == "acknowledge"
     assert _actual_signal(bound, bindings["body_data"]).kind == "payload"
-    assert _actual_signal(bound, bindings["enable"]).kind == "enable"
+    assert _actual_signal(bound, bindings["enable_data"]).kind == "payload"
+    assert not any(item.source is stage.input_port and item.template == "four_phase_receive_port"
+                   for item in bound.instances)
 
 
 def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
@@ -290,7 +354,7 @@ def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
     assert join_bindings["stage_release"].actual_signal_id == completion_bindings["stage_complete"].actual_signal_id
 
 
-def test_en_send_and_each_matched_delay_have_complete_typed_bindings() -> None:
+def test_post_input_enable_is_not_an_output_fork_member_and_matched_delays_remain_typed() -> None:
     program = _Program()
     expression = Expression("binary", operator="+", operands=(program.name("a"), Expression("literal", value="1'b1")))
     conditional_send = program.send("B", program.name("y"))
@@ -301,13 +365,11 @@ def test_en_send_and_each_matched_delay_have_complete_typed_bindings() -> None:
         program.send("C", program.name("y")),
     )))
 
-    adapter = architecture.output_fork.outputs[0].en_send
-    assert adapter is not None
-    en_send = _bound_for(bound, adapter)
-    assert {binding.formal_name for binding in _bindings_for(bound, en_send)} == {
-        "body_req", "body_ack", "body_data",
-        "external_req", "external_ack", "external_data", "enable",
-    }
+    post_input = next(channel for channel in architecture.enable_channels
+                      if channel.availability.value == "post_input")
+    binding = _enable_channel_binding(bound, post_input)
+    assert binding.producer_completion is True
+    assert post_input not in architecture.output_fork.outputs
     for requirement in architecture.matched_delays:
         delay = _bound_for(bound, requirement)
         bindings = {binding.formal_name: binding for binding in _bindings_for(bound, delay)}
