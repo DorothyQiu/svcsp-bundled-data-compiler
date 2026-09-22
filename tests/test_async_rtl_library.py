@@ -70,6 +70,40 @@ def test_bundled_data_matched_delay_has_only_control_formals() -> None:
     assert "data_path" not in source
 
 
+def test_four_phase_enable_sender_declares_the_channel_sender_contract() -> None:
+    source = _controller_source("four_phase_enable_sender")
+
+    assert "module four_phase_enable_sender" in source
+    for formal in ("value", "launch", "req", "ack", "data"):
+        assert formal in source
+
+
+def test_en_receive_stage_declares_the_width_parameterized_three_channel_contract() -> None:
+    source = _controller_source("en_receive_stage")
+
+    assert "module en_receive_stage" in source
+    assert "parameter" in source and "WIDTH" in source
+    for formal in (
+        "enable_req", "enable_ack", "enable_data",
+        "external_req", "external_ack", "external_data",
+        "body_req", "body_ack", "body_data",
+    ):
+        assert formal in source
+
+
+def test_en_send_stage_declares_the_width_parameterized_three_channel_contract() -> None:
+    source = _controller_source("en_send_stage")
+
+    assert "module en_send_stage" in source
+    assert "parameter" in source and "WIDTH" in source
+    for formal in (
+        "enable_req", "enable_ack", "enable_data",
+        "body_req", "body_ack", "body_data",
+        "external_req", "external_ack", "external_data",
+    ):
+        assert formal in source
+
+
 def _simulate(tmp_path: Path, name: str, testbench: str) -> None:
     if not (IVERILOG and VVP):
         pytest.skip("Icarus Verilog is not available")
@@ -218,6 +252,131 @@ module tb;
     control_in = 1'b0;
     #2; if (control_out !== 1'b1) $fatal(1, "falling control arrived too early");
     #2; if (control_out !== 1'b0) $fatal(1, "falling control did not propagate");
+    $finish;
+  end
+endmodule
+""")
+
+
+def test_four_phase_enable_sender_captures_one_stable_token_per_launch(tmp_path: Path) -> None:
+    _simulate(tmp_path, "enable_sender", """
+module tb;
+  reg value = 0, launch = 0, ack = 0;
+  wire req, data;
+  four_phase_enable_sender dut (.value(value), .launch(launch), .req(req), .ack(ack), .data(data));
+  initial begin
+    #1; if ({req, data} !== 2'b00) $fatal(1, "initial idle");
+    value = 1'b1; launch = 1'b1;
+    #1; if ({req, data} !== 2'b11) $fatal(1, "launch captures first value");
+    value = 1'b0;
+    #1; if ({req, data} !== 2'b11) $fatal(1, "active payload changed");
+    ack = 1'b1;
+    #1; if (req !== 1'b1) $fatal(1, "request dropped before launch reset");
+    launch = 1'b0;
+    #1; if (req !== 1'b0) $fatal(1, "request did not reset after acknowledge");
+    ack = 1'b0;
+    #1; if (req !== 1'b0) $fatal(1, "request restarted before acknowledge reset");
+    value = 1'b0; launch = 1'b1;
+    #1; if ({req, data} !== 2'b10) $fatal(1, "second launch did not capture new value");
+    ack = 1'b1; launch = 1'b0;
+    #1; if (req !== 1'b0) $fatal(1, "second request did not reset");
+    ack = 1'b0;
+    #1; $finish;
+  end
+endmodule
+""")
+
+
+@pytest.mark.parametrize("width, first, second", (
+    (1, "1'b1", "1'b0"),
+    (8, "8'ha5", "8'h3c"),
+))
+def test_en_receive_stage_handles_enabled_and_disabled_body_tokens(
+    tmp_path: Path, width: int, first: str, second: str,
+) -> None:
+    _simulate(tmp_path, f"en_receive_{width}", f"""
+module tb;
+  reg enable_req = 0, enable_data = 0;
+  reg external_req = 0, body_ack = 0;
+  reg [{width - 1}:0] external_data = '0;
+  wire enable_ack, external_ack, body_req;
+  wire [{width - 1}:0] body_data;
+  en_receive_stage #(.WIDTH({width})) dut (
+    .enable_req(enable_req), .enable_ack(enable_ack), .enable_data(enable_data),
+    .external_req(external_req), .external_ack(external_ack), .external_data(external_data),
+    .body_req(body_req), .body_ack(body_ack), .body_data(body_data)
+  );
+  initial begin
+    #1; if ({{enable_ack, external_ack, body_req}} !== 3'b000) $fatal(1, "initial idle");
+    enable_data = 1'b1; enable_req = 1'b1;
+    #1; if (enable_ack !== 1'b1 || external_ack !== 1'b0 || body_req !== 1'b0) $fatal(1, "enable not consumed first");
+    enable_req = 1'b0;
+    #1; if (enable_ack !== 1'b0) $fatal(1, "enable reset");
+    external_data = {first}; external_req = 1'b1;
+    #1; if (external_ack !== 1'b1 || body_req !== 1'b1 || body_data !== {first}) $fatal(1, "enabled receive missing");
+    external_data = {second};
+    #1; if (body_data !== {first}) $fatal(1, "body payload was not retained");
+    external_req = 1'b0;
+    #1; if (external_ack !== 1'b0) $fatal(1, "external reset");
+    body_ack = 1'b1;
+    #1; if (body_req !== 1'b0) $fatal(1, "body request reset");
+    body_ack = 1'b0;
+    #1;
+    enable_data = 1'b0; enable_req = 1'b1;
+    #1; if (enable_ack !== 1'b1 || external_ack !== 1'b0 || body_req !== 1'b1 || body_data !== '0) $fatal(1, "disabled receive token");
+    enable_req = 1'b0;
+    #1; if (enable_ack !== 1'b0) $fatal(1, "disabled enable reset");
+    body_ack = 1'b1;
+    #1; if (body_req !== 1'b0 || external_ack !== 1'b0) $fatal(1, "disabled body completion");
+    body_ack = 1'b0;
+    #1; $finish;
+  end
+endmodule
+""")
+
+
+@pytest.mark.parametrize("width, first, second", (
+    (1, "1'b1", "1'b0"),
+    (8, "8'ha5", "8'h3c"),
+))
+def test_en_send_stage_consumes_body_before_conditional_external_send(
+    tmp_path: Path, width: int, first: str, second: str,
+) -> None:
+    _simulate(tmp_path, f"en_send_{width}", f"""
+module tb;
+  reg enable_req = 0, enable_data = 0;
+  reg body_req = 0, external_ack = 0;
+  reg [{width - 1}:0] body_data = '0;
+  wire enable_ack, body_ack, external_req;
+  wire [{width - 1}:0] external_data;
+  en_send_stage #(.WIDTH({width})) dut (
+    .enable_req(enable_req), .enable_ack(enable_ack), .enable_data(enable_data),
+    .body_req(body_req), .body_ack(body_ack), .body_data(body_data),
+    .external_req(external_req), .external_ack(external_ack), .external_data(external_data)
+  );
+  initial begin
+    body_data = {first}; body_req = 1'b1;
+    #1; if (body_ack !== 1'b0 || external_req !== 1'b0) $fatal(1, "body accepted before enable");
+    enable_data = 1'b1; enable_req = 1'b1;
+    #1; if (enable_ack !== 1'b1 || body_ack !== 1'b1 || external_req !== 1'b1 || external_data !== {first}) $fatal(1, "enabled send missing");
+    body_data = {second};
+    #1; if (external_data !== {first}) $fatal(1, "external payload was not retained");
+    body_req = 1'b0;
+    #1; if (body_ack !== 1'b0) $fatal(1, "body acknowledgement reset");
+    enable_req = 1'b0;
+    #1; if (enable_ack !== 1'b0) $fatal(1, "enable acknowledgement reset");
+    external_ack = 1'b1;
+    #1; if (external_req !== 1'b0) $fatal(1, "external request reset");
+    external_ack = 1'b0;
+    #1;
+    body_data = {second}; body_req = 1'b1;
+    #1; if (body_ack !== 1'b0) $fatal(1, "second body accepted before disabled enable");
+    enable_data = 1'b0; enable_req = 1'b1;
+    #1; if (enable_ack !== 1'b1 || body_ack !== 1'b1 || external_req !== 1'b0) $fatal(1, "disabled send behavior");
+    body_req = 1'b0;
+    #1; if (body_ack !== 1'b0) $fatal(1, "disabled body acknowledgement reset");
+    enable_req = 1'b0;
+    #1; if (enable_ack !== 1'b0 || external_req !== 1'b0) $fatal(1, "disabled transaction reset");
     $finish;
   end
 endmodule
