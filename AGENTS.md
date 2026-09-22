@@ -6,7 +6,7 @@ structural, synthesizable asynchronous RTL.
 Initial backend target:
 
 ```text
-bundled-data + four-phase handshake
+four-phase bundled-data half-buffer
 ```
 
 The target compiler architecture is defined by the documentation, not by legacy
@@ -14,7 +14,8 @@ implementation structures.
 
 # Target Source Model
 
-One supported top-level process represents one single-stage transaction:
+One supported top-level process represents one transaction, not necessarily one
+physical stage:
 
 ```text
 N independent Channel Receive(s)
@@ -78,8 +79,13 @@ EN_RECV
 EN_SEND
 ```
 
-`enable` is an abstract control concept. Do not assume it must be a wire,
-Channel, or specific handshake mechanism.
+At M4, `Enable` is an abstract logical condition. Do not assume it must be a
+wire, Channel, or specific handshake mechanism at that phase. The current M6
+backend realizes each Enable as a one-bit four-phase bundled-data Channel:
+BODY unconditionally sends exactly one enable token per transaction to its
+corresponding EN_RECV or EN_SEND stage. Enable Channels are BODY control
+outputs, not ordinary post-join data outputs; EN_RECV must receive its enable
+without waiting for the BODY input communication that it controls.
 
 `BODY` is used only after decomposition and contains:
 
@@ -104,6 +110,10 @@ enable = 0:
 
 The BODY-side Receive is always unconditional.
 
+EN_RECV is a separate micropipeline stage. At enable=0 it emits one
+InvalidPayload/dummy BODY token; at enable=1 it performs the external Receive
+and emits the real payload.
+
 For conditional Send:
 
 ```text
@@ -115,6 +125,10 @@ enable = 0:
 ```
 
 The BODY-side Send is always unconditional.
+
+EN_SEND is a separate micropipeline stage. It always consumes the BODY token;
+at enable=1 it performs the external Send, and at enable=0 it ignores the
+payload and synthesizes no extra dummy token.
 
 # Validation Rules
 

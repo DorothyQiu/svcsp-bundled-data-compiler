@@ -206,7 +206,8 @@ EN_RECV / EN_SEND
 
 while keeping BODY-side Channel communication unconditional.
 
-`enable` remains an abstract control concept at this stage.
+At M4, `enable` remains an abstract logical control concept at this stage; it
+does not yet require a wire, Channel, or handshake implementation.
 
 Detailed semantics are defined in:
 
@@ -318,8 +319,14 @@ This stage makes architecture decisions including:
 - EN_RECV placement;
 - EN_SEND placement.
 
-The initial implementation target uses bundled-data with a four-phase
-handshake.
+The initial implementation target is a four-phase bundled-data half-buffer. It
+realizes every M4 Enable as a one-bit four-phase bundled-data Channel from BODY
+to a separate EN_RECV or EN_SEND micropipeline stage. BODY emits exactly one
+enable token per transaction. These are control outputs rather than post-join
+data outputs, and an EN_RECV enable must not wait for the BODY input
+communication it controls. EN_RECV always produces a BODY token
+(InvalidPayload/dummy when disabled); EN_SEND always consumes its BODY token
+and suppresses only the external output when disabled.
 
 ## Output
 
@@ -382,7 +389,8 @@ one supported top-level process
 =
 one transaction
 =
-one asynchronous stage
+one M6 transaction architecture, which may contain multiple physical
+micropipeline stages (including EN_RECV / EN_SEND)
 ```
 
 There is therefore no pipeline-partitioning or stage-formation pass in the

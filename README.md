@@ -7,14 +7,12 @@ asynchronous implementation.
 Initial backend target:
 
 ```text
-bundled-data
-+
-four-phase handshake
+four-phase bundled-data half-buffer
 ```
 
 ## Target Source Model
 
-One supported top-level process represents one single-stage transaction:
+One supported top-level process represents one transaction:
 
 ```text
 N independent Channel Receive(s)
@@ -71,8 +69,13 @@ enable
 EN_RECV / EN_SEND
 ```
 
-`enable` is an abstract control concept and is not fixed at the architecture
-level to a wire, Channel, or specific handshake mechanism.
+At M4, `Enable` remains a logical condition and is not fixed to a wire,
+Channel, or specific handshake mechanism. The current M6/M7 backend realizes
+each Enable as a one-bit four-phase bundled-data Channel: BODY unconditionally
+sends exactly one enable token per transaction to the corresponding EN_RECV or
+EN_SEND stage. These are BODY control outputs, not ordinary post-join data
+outputs; an EN_RECV enable must be available without waiting for the BODY input
+communication it controls.
 
 After decomposition:
 
@@ -81,6 +84,12 @@ After decomposition:
 - `EN_RECV` controls whether real external input or dummy/invalid data is
   supplied to BODY;
 - `EN_SEND` controls whether BODY-side output is forwarded externally.
+
+EN_RECV and EN_SEND are separate micropipeline stages. EN_RECV performs the
+external input only for enable=1, but always emits a BODY token; enable=0 emits
+an InvalidPayload/dummy BODY token. EN_SEND always consumes the BODY token;
+enable=1 forwards it externally, while enable=0 discards its payload and emits
+no external or extra dummy token.
 
 See `docs/communication_decomposition.md` for the detailed semantics.
 

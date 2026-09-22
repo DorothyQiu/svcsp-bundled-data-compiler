@@ -172,6 +172,10 @@ BODY + enable + EN_RECV / EN_SEND
 
 with unconditional BODY-side communication.
 
+M4 keeps Enable logical: it is not yet a Channel or wire. The current M6/M7
+target later realizes every Enable as a one-bit four-phase bundled-data control
+Channel from BODY to its EN_RECV or EN_SEND stage.
+
 ## Tests
 
 ### Conditional Receive
@@ -199,6 +203,9 @@ enable = 1:
 enable = 0:
     external Send suppressed
 ```
+
+EN_SEND still consumes the unconditional BODY token when disabled; it ignores
+the payload and creates no extra dummy token.
 
 ### Alternatives
 
@@ -366,6 +373,13 @@ EN_RECV
 EN_SEND
 ```
 
+Verify the current four-phase bundled-data half-buffer realization: BODY sends
+exactly one one-bit enable token per transaction to each separate EN_RECV or
+EN_SEND micropipeline stage. Enable Channels are BODY control outputs, not
+ordinary post-join data outputs. An EN_RECV enable must be available without
+waiting for its controlled BODY input; EN_RECV always produces a BODY token,
+using InvalidPayload/dummy data when disabled.
+
 ## Required architecture decisions
 
 The microarchitecture must fully define:
@@ -394,7 +408,7 @@ Emit structural, synthesizable asynchronous SystemVerilog.
 Initial backend:
 
 ```text
-bundled-data + four-phase handshake
+four-phase bundled-data half-buffer
 ```
 
 ## Structural tests

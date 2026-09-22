@@ -4,7 +4,8 @@ This document defines the source programs accepted by the target compiler.
 
 ## Target Transaction Model
 
-One supported top-level process represents one single-stage transaction:
+One supported top-level process represents one transaction, not necessarily one
+physical stage:
 
 ```text
 N independent Channel Receive(s)
@@ -155,6 +156,17 @@ if (sel)
 
 The compiler later decomposes this into unconditional BODY-side communication
 plus conditional external communication.
+
+At M4, the condition is a logical `Enable`. In the current four-phase
+bundled-data half-buffer backend, M6 realizes each Enable as a one-bit
+four-phase bundled-data Channel. BODY sends exactly one token per transaction
+to the corresponding separate EN_RECV or EN_SEND micropipeline stage. These
+are control outputs rather than ordinary post-join data outputs, so an EN_RECV
+enable is available independently of the BODY input it controls. EN_RECV always
+emits a BODY token (real payload when enabled; InvalidPayload/dummy payload when
+disabled). EN_SEND always consumes its BODY token, forwarding it externally
+only when enabled and otherwise dropping its payload without an extra dummy
+token.
 
 Any use of the received value must be valid under the corresponding condition.
 
@@ -322,7 +334,7 @@ Supported:
 
 ```text
 one process
-one transaction stage
+one transaction (which may lower to multiple physical micropipeline stages)
 N independent input communications
 combinational computation
 M independent output communications

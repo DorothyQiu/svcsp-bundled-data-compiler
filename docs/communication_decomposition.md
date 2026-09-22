@@ -12,8 +12,18 @@ conditional Receive / Send
 BODY + enable + EN_RECV / EN_SEND
 ```
 
-`enable` is an abstract control concept. Its physical realization is not fixed
-at this stage.
+At M4, `enable` is an abstract logical condition. Its physical realization is
+not fixed at this stage.
+
+## Current backend realization
+
+The current M6/M7 target is a four-phase bundled-data half-buffer. It realizes
+each M4 Enable as a one-bit four-phase bundled-data Channel. BODY
+unconditionally sends exactly one enable token per transaction to the
+corresponding EN_RECV or EN_SEND, each of which is a separate micropipeline
+stage. These Enable Channels are BODY control outputs, not ordinary post-join
+data outputs. In particular, EN_RECV receives its enable without waiting for
+the BODY-side input communication it controls.
 
 ---
 
@@ -104,6 +114,9 @@ unconditional.
 
 It is not semantically valid application data.
 
+Thus EN_RECV always produces one BODY token: real data at enable=1 and an
+InvalidPayload/dummy token at enable=0.
+
 ---
 
 # 3. Conditional Send
@@ -143,6 +156,8 @@ enable = 0
 
 `EN_SEND` consumes the BODY-side communication but suppresses the external
 Send.
+
+It ignores the consumed payload and synthesizes no extra dummy token.
 
 ---
 
@@ -214,8 +229,9 @@ C: !x
 
 This decomposition defines logical control only.
 
-It does not require `enable` to be implemented as a wire, Channel, or specific
-handshake protocol.
+M4 does not require `enable` to be implemented as a wire, Channel, or specific
+handshake protocol. The current later-stage realization is the one-bit
+four-phase bundled-data Enable Channel defined above.
 
 ---
 
@@ -298,7 +314,7 @@ which BODY-side communication becomes unconditional
 This stage does not decide:
 
 ```text
-physical enable representation
+M4 physical enable representation
 input synchronization topology
 output distribution topology
 storage implementation
