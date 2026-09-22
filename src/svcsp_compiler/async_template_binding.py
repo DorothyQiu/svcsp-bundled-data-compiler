@@ -86,6 +86,16 @@ class BoundAsyncParameterBinding:
 
 
 @dataclass(frozen=True)
+class BoundAsyncAssignment:
+    """A connectivity decision made by M7A and rendered mechanically by M7B."""
+
+    target_signal_id: str
+    expression: behavioral.Expression | None
+    source: object
+    kind: str
+
+
+@dataclass(frozen=True)
 class BoundEnableChannel:
     """The complete bound four-phase transport for one M6 EnableChannel."""
 
@@ -109,6 +119,7 @@ class BoundAsyncModule:
     port_bindings: tuple[BoundAsyncPortBinding, ...] = ()
     parameter_bindings: tuple[BoundAsyncParameterBinding, ...] = ()
     enable_channels: tuple[BoundEnableChannel, ...] = ()
+    assignments: tuple[BoundAsyncAssignment, ...] = ()
 
 
 _IDENTIFIER = re.compile(r"[^A-Za-z0-9_$]")
@@ -243,18 +254,19 @@ def bind_async_templates(architecture: AsyncMicroarchitecture) -> BoundAsyncModu
     for requirement in architecture.matched_delays:
         _bind_delay(requirement, instances, connections, output_indices, storage_indices)
 
-    instances, signals, connections, port_bindings, parameter_bindings, enable_channel_bindings = _typed_bindings(
+    instances, signals, connections, port_bindings, parameter_bindings, enable_channel_bindings, assignments = _typed_bindings(
         architecture, instances, signals, ports,
     )
     return BoundAsyncModule(architecture, tuple(instances), tuple(signals), tuple(ports), tuple(connections),
-                            tuple(port_bindings), tuple(parameter_bindings), tuple(enable_channel_bindings))
+                            tuple(port_bindings), tuple(parameter_bindings), tuple(enable_channel_bindings),
+                            tuple(assignments))
 
 
 def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundAsyncInstance],
                     signals: list[BoundAsyncSignal], ports: list[BoundAsyncModulePort]) -> tuple[
                         list[BoundAsyncInstance], list[BoundAsyncSignal], list[BoundAsyncConnection],
                         list[BoundAsyncPortBinding], list[BoundAsyncParameterBinding],
-                        list[BoundEnableChannel]]:
+                        list[BoundEnableChannel], list[BoundAsyncAssignment]]:
     """Turn the M6 graph into a closed set of named template actuals."""
 
     signal_by_id = {signal.id: signal for signal in signals}
@@ -275,6 +287,7 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
     parameters: dict[str, tuple[str, ...]] = {}
     bindings: list[BoundAsyncPortBinding] = []
     parameter_bindings: list[BoundAsyncParameterBinding] = []
+    assignments: list[BoundAsyncAssignment] = []
 
     def bind(instance: BoundAsyncInstance, formal: str, actual: str) -> None:
         if actual not in signal_by_id:
@@ -292,6 +305,8 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
         bind(sender, "req", request)
         bind(sender, "ack", acknowledge)
         bind(sender, "data", data)
+        assignments.append(BoundAsyncAssignment(data, channel.enable.condition, channel.enable,
+                                                "enable_payload"))
         enable_signals[channel] = request, acknowledge, data
         enable_channel_bindings.append(BoundEnableChannel(
             channel, channel, channel.availability,
@@ -303,15 +318,17 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
     join_instance = by_source[join]
     join_control = ensure("input_join_control", "control", behavioral.ONE_BIT)
     stage_complete = ensure("stage_complete", "control", behavioral.ONE_BIT)
-    join_formals: list[str] = []
+    input_count = behavioral.PayloadWidth(bits=len(join.inputs))
+    join_request = ensure("input_join_req", "request", input_count)
+    join_acknowledge = ensure("input_join_ack", "acknowledge", input_count)
     input_body: dict[InputPort, tuple[str, str, str]] = {}
     for index, input_port in enumerate(join.inputs):
         operation = input_port.body_receive.source.operation
         assert isinstance(operation, behavioral.Receive)
         payload = _receive_payload_type(operation)
         body = (
-            ensure(f"input_{index}_body_req", "request", behavioral.ONE_BIT),
-            ensure(f"input_{index}_body_ack", "acknowledge", behavioral.ONE_BIT),
+            join_request if len(join.inputs) == 1 else ensure(f"input_{index}_body_req", "request", behavioral.ONE_BIT),
+            join_acknowledge if len(join.inputs) == 1 else ensure(f"input_{index}_body_ack", "acknowledge", behavioral.ONE_BIT),
             ensure(f"input_{index}_body_data", "payload", payload.width, operation.channel),
         )
         input_body[input_port] = body
@@ -343,33 +360,50 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
                 ("body_req", req), ("body_ack", ack), ("body_data", data),
             ):
                 bind(stage_instance, formal, actual)
-        join_formals.extend((f"input_req_{index}", f"input_ack_{index}"))
-        bind(join_instance, f"input_req_{index}", req)
-        bind(join_instance, f"input_ack_{index}", ack)
-    join_formals.extend(("stage_release", "control"))
-    formals[join_instance.id] = tuple(join_formals)
+        assignments.append(BoundAsyncAssignment(join_request, None, input_port, "pack_input_handshakes"))
+        assignments.append(BoundAsyncAssignment(ack, None, input_port, "unpack_input_handshakes"))
+    formals[join_instance.id] = ("input_req", "input_ack", "stage_release", "control")
+    parameters[join_instance.id] = ("N",)
+    bind(join_instance, "input_req", join_request)
+    bind(join_instance, "input_ack", join_acknowledge)
     bind(join_instance, "stage_release", stage_complete)
     bind(join_instance, "control", join_control)
+    parameter_bindings.append(BoundAsyncParameterBinding(join_instance.id, "N", input_count))
 
     storage_by_output = {slot.retained_until: slot for slot in architecture.storage.slots}
+    storage_data_in: dict[StorageSlot, str] = {}
+    storage_data_out: dict[StorageSlot, str] = {}
     for index, slot in enumerate(architecture.storage.slots):
         operation = slot.body_send.source.operation
         assert isinstance(operation, behavioral.Send)
         payload = _send_payload_type(operation)
         storage = by_source[slot]
-        data = ensure(f"storage_{index}_data", "payload", payload.width, operation.channel)
+        data_in = ensure(f"storage_{index}_data_in", "payload", payload.width, operation.channel)
+        data_out = ensure(f"storage_{index}_data_out", "payload", payload.width, operation.channel)
+        storage_data_in[slot] = data_in
+        storage_data_out[slot] = data_out
         formals[storage.id] = ("data_in", "data_out", "capture", "release")
         parameters[storage.id] = ("WIDTH",)
-        for formal, actual in (("data_in", data), ("data_out", data), ("capture", join_control),
+        for formal, actual in (("data_in", data_in), ("data_out", data_out), ("capture", join_control),
                                ("release", stage_complete)):
             bind(storage, formal, actual)
         parameter_bindings.append(BoundAsyncParameterBinding(storage.id, "WIDTH", payload.width))
+        assignments.append(BoundAsyncAssignment(data_in, operation.value, slot.body_send, "body_send_payload"))
+
+    for index, operation in enumerate(architecture.combinational.operations):
+        if isinstance(operation.operation, behavioral.Assign):
+            payload = behavioral.expression_payload_type(operation.operation.value)
+            width = payload.width if payload is not None else behavioral.ONE_BIT
+            target = ensure(f"combinational_{index}_value", "payload", width)
+            assignments.append(BoundAsyncAssignment(target, operation.operation.value, operation,
+                                                    "body_combinational"))
 
     fork = architecture.output_fork
     fork_instance = next(instance for instance in instances if instance.template == "four_phase_output_fork")
     completion_instance = next(instance for instance in instances if instance.template == "four_phase_output_completion")
-    fork_formals: list[str] = []
-    completion_formals: list[str] = []
+    output_count = behavioral.PayloadWidth(bits=len(fork.outputs))
+    fork_launch_vector = ensure("output_fork_launch", "request", output_count)
+    fork_complete_vector = ensure("output_fork_complete", "completion", output_count)
     output_launch: dict[OutputPort, str] = {}
     output_complete: dict[OutputPort, str] = {}
     for index, output in enumerate(fork.outputs):
@@ -385,7 +419,7 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
             for formal, actual in (
                 ("external_req", external(operation.channel, "send", "request")),
                 ("external_ack", external(operation.channel, "send", "acknowledge")),
-                ("payload", f"storage_{architecture.storage.slots.index(slot)}_data"),
+                ("payload", storage_data_out[slot]),
                 ("launch", launch), ("complete", complete),
             ):
                 bind(branch, formal, actual)
@@ -402,31 +436,31 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
             for formal, actual in (
                 ("enable_req", enable_req), ("enable_ack", enable_ack), ("enable_data", enable_data),
                 ("body_req", body_req), ("body_ack", body_ack),
-                ("body_data", f"storage_{architecture.storage.slots.index(slot)}_data"),
+                ("body_data", storage_data_out[slot]),
                 ("external_req", external(operation.channel, "send", "request")),
                 ("external_ack", external(operation.channel, "send", "acknowledge")),
                 ("external_data", external(operation.channel, "send", "payload")),
             ):
                 bind(stage_instance, formal, actual)
-        fork_formals.extend((f"launch_{index}", f"complete_{index}"))
-        completion_formals.append(f"complete_{index}")
-        bind(fork_instance, f"launch_{index}", launch)
-        bind(fork_instance, f"complete_{index}", complete)
-        bind(completion_instance, f"complete_{index}", complete)
-    fork_formals.append("stage_complete")
-    completion_formals.append("stage_complete")
-    formals[fork_instance.id] = tuple(fork_formals)
-    formals[completion_instance.id] = tuple(completion_formals)
+        assignments.append(BoundAsyncAssignment(launch, None, output, "unpack_output_launch"))
+        assignments.append(BoundAsyncAssignment(fork_complete_vector, None, output, "pack_output_completion"))
+    formals[fork_instance.id] = ("launch", "complete", "stage_complete")
+    formals[completion_instance.id] = ("complete", "stage_complete")
+    parameters[fork_instance.id] = ("M",)
+    parameters[completion_instance.id] = ("M",)
+    bind(fork_instance, "launch", fork_launch_vector)
+    bind(fork_instance, "complete", fork_complete_vector)
+    bind(completion_instance, "complete", fork_complete_vector)
     bind(fork_instance, "stage_complete", stage_complete)
     bind(completion_instance, "stage_complete", stage_complete)
+    parameter_bindings.append(BoundAsyncParameterBinding(fork_instance.id, "M", output_count))
+    parameter_bindings.append(BoundAsyncParameterBinding(completion_instance.id, "M", output_count))
 
     for requirement in architecture.matched_delays:
         delay = by_source[requirement]
-        formals[delay.id] = ("control_in", "control_out", "data_path")
+        formals[delay.id] = ("control_in", "control_out")
         bind(delay, "control_in", join_control)
         bind(delay, "control_out", output_launch[requirement.output_port])
-        slot_index = architecture.storage.slots.index(requirement.storage_slot)
-        bind(delay, "data_path", f"storage_{slot_index}_data")
 
     updated = [replace(instance, component=instance.template,
                        required_formals=formals.get(instance.id, ()),
@@ -437,7 +471,8 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
             raise AsyncTemplateBindingError(f"{instance.id} has incomplete formal bindings")
     connections = [BoundAsyncConnection(item.actual_signal_id, f"{item.instance_id}.{item.formal_name}", "formal")
                    for item in bindings]
-    return updated, list(signal_by_id.values()), connections, bindings, parameter_bindings, enable_channel_bindings
+    return (updated, list(signal_by_id.values()), connections, bindings, parameter_bindings,
+            enable_channel_bindings, assignments)
 
 
 def _bind_delay(requirement: MatchedDelayRequirement, instances: list[BoundAsyncInstance],

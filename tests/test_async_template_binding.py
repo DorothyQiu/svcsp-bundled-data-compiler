@@ -336,7 +336,7 @@ def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
 
     join = _bound_for(bound, architecture.input_join)
     join_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, join)}
-    assert {"input_req_0", "input_ack_0", "input_req_1", "input_ack_1", "stage_release"} <= set(join_bindings)
+    assert {"input_req", "input_ack", "stage_release"} <= set(join_bindings)
     assert all(_actual_signal(bound, join_bindings[name]).kind in {"request", "acknowledge", "control"}
                for name in join_bindings)
 
@@ -349,7 +349,7 @@ def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
 
     completion = next(instance for instance in bound.instances if instance.template == "four_phase_output_completion")
     completion_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, completion)}
-    assert {"complete_0", "complete_1", "stage_complete"} <= set(completion_bindings)
+    assert {"complete", "stage_complete"} <= set(completion_bindings)
     assert _actual_signal(bound, completion_bindings["stage_complete"]).kind == "control"
     assert join_bindings["stage_release"].actual_signal_id == completion_bindings["stage_complete"].actual_signal_id
 
@@ -373,8 +373,94 @@ def test_post_input_enable_is_not_an_output_fork_member_and_matched_delays_remai
     for requirement in architecture.matched_delays:
         delay = _bound_for(bound, requirement)
         bindings = {binding.formal_name: binding for binding in _bindings_for(bound, delay)}
-        assert set(bindings) == {"control_in", "control_out", "data_path"}
+        assert set(bindings) == {"control_in", "control_out"}
         assert bindings["control_in"].actual_signal_id in {signal.id for signal in bound.signals}
         assert bindings["control_out"].actual_signal_id in {signal.id for signal in bound.signals}
+        assert delay.storage_slot is requirement.storage_slot
+        assert delay.output_port is requirement.output_port
 
     _assert_complete_typed_bindings(bound)
+
+
+def test_input_join_uses_parameterized_vector_handshakes_and_typed_pack_assignments() -> None:
+    program = _Program()
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        program.send("C", Expression("literal", value="1'b0")),
+    )))
+
+    join = _bound_for(bound, architecture.input_join)
+    parameters = {item.formal_name: item.value for item in bound.parameter_bindings if item.instance_id == join.id}
+    bindings = {item.formal_name: item for item in _bindings_for(bound, join)}
+    assert parameters["N"].bits == 2
+    assert _actual_signal(bound, bindings["input_req"]).width.bits == 2
+    assert _actual_signal(bound, bindings["input_ack"]).width.bits == 2
+    assert not any(name.startswith("input_req_") or name.startswith("input_ack_") for name in bindings)
+    assert {assignment.kind for assignment in bound.assignments} >= {"pack_input_handshakes", "unpack_input_handshakes"}
+
+
+def test_output_fork_and_completion_use_parameterized_vector_branch_controls() -> None:
+    program = _Program()
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        program.send("B", program.name("a")),
+        program.send("C", program.name("a")),
+    )))
+
+    fork = _bound_for(bound, architecture.output_fork)
+    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
+    fork_parameters = {item.formal_name: item.value for item in bound.parameter_bindings if item.instance_id == fork.id}
+    completion_parameters = {item.formal_name: item.value for item in bound.parameter_bindings
+                             if item.instance_id == completion.id}
+    fork_bindings = {item.formal_name: item for item in _bindings_for(bound, fork)}
+    completion_bindings = {item.formal_name: item for item in _bindings_for(bound, completion)}
+    assert fork_parameters["M"].bits == 2
+    assert completion_parameters["M"].bits == 2
+    assert _actual_signal(bound, fork_bindings["launch"]).width.bits == 2
+    assert _actual_signal(bound, fork_bindings["complete"]).width.bits == 2
+    assert _actual_signal(bound, completion_bindings["complete"]).width.bits == 2
+    assert not any(name.startswith("launch_") or name.startswith("complete_") for name in fork_bindings)
+
+
+def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() -> None:
+    program = _Program()
+    expression = Expression("binary", operator="+", operands=(program.name("a"), Expression("literal", value="1'b1")))
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        Assign(program.variable("y"), expression),
+        program.send("B", program.name("y")),
+    )))
+
+    slot = architecture.storage.slots[0]
+    storage = _bound_for(bound, slot)
+    storage_bindings = {item.formal_name: item for item in _bindings_for(bound, storage)}
+    assert storage_bindings["data_in"].actual_signal_id != storage_bindings["data_out"].actual_signal_id
+    assert any(assignment.source is architecture.combinational.operations[0]
+               and assignment.expression is expression for assignment in bound.assignments)
+    body_send = architecture.output_fork.outputs[0].body_send
+    assert any(assignment.source is body_send and assignment.expression is body_send.source.operation.value
+               and assignment.target_signal_id == storage_bindings["data_in"].actual_signal_id
+               for assignment in bound.assignments)
+    output = _bound_for(bound, architecture.output_fork.outputs[0])
+    output_bindings = {item.formal_name: item for item in _bindings_for(bound, output)}
+    assert output_bindings["payload"].actual_signal_id == storage_bindings["data_out"].actual_signal_id
+
+
+def test_enable_payload_is_driven_by_its_exact_m4_condition_not_a_scalar_wire() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    for channel in architecture.enable_channels:
+        binding = _enable_channel_binding(bound, channel)
+        assert any(assignment.target_signal_id == binding.data_signal_id
+                   and assignment.expression is channel.enable.condition
+                   for assignment in bound.assignments)
+        assert _actual_signal(bound, next(item for item in _bindings_for(bound, binding.body_sender)
+                                          if item.formal_name == "req")).kind == "request"
+        assert _actual_signal(bound, next(item for item in _bindings_for(bound, binding.body_sender)
+                                          if item.formal_name == "ack")).kind == "acknowledge"

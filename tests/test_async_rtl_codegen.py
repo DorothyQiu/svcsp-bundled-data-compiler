@@ -103,8 +103,10 @@ def test_2r1s_emits_each_input_handshake_without_source_order_topology() -> None
     rtl = emit_async_systemverilog(bound)
 
     _assert_exact_binding_rendered(bound, rtl)
-    assert ".input_req_0(" in rtl and ".input_req_1(" in rtl
-    assert ".input_ack_0(" in rtl and ".input_ack_1(" in rtl
+    assert ".N(2)" in rtl
+    assert ".input_req(input_join_req)" in rtl
+    assert ".input_ack(input_join_ack)" in rtl
+    assert ".input_req_0(" not in rtl and ".input_ack_0(" not in rtl
 
 
 def test_1r2s_emits_independent_output_branches_storage_and_completion() -> None:
@@ -123,6 +125,10 @@ def test_1r2s_emits_independent_output_branches_storage_and_completion() -> None
     assert "four_phase_output_completion output_completion" in rtl
     assert rtl.count("bundled_data_storage storage_") == 2
     assert rtl.count("bundled_data_matched_delay matched_delay_") == 2
+    assert rtl.count(".M(2)") == 2
+    assert ".launch(output_fork_launch)" in rtl
+    assert ".complete(output_fork_complete)" in rtl
+    assert ".launch_0(" not in rtl and ".complete_0(" not in rtl
 
 
 def test_2r2s_emits_all_m6_join_fork_and_storage_connectivity() -> None:
