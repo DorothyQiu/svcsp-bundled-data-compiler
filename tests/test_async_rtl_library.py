@@ -19,6 +19,12 @@ def _controller_source(module: str) -> str:
     return path.read_text()
 
 
+def _library_source(directory: str, module: str) -> str:
+    path = RTL_LIB / directory / f"{module}.sv"
+    assert path.is_file(), f"missing async RTL-library module: {path.relative_to(ROOT)}"
+    return path.read_text()
+
+
 def test_four_phase_input_join_declares_the_vectorized_stage_contract() -> None:
     source = _controller_source("four_phase_input_join")
 
@@ -44,6 +50,24 @@ def test_four_phase_output_completion_declares_the_vectorized_release_contract()
     assert "parameter" in source and "M" in source
     assert "complete" in source
     assert "release" in source
+
+
+def test_bundled_data_storage_declares_the_current_m7a_capture_release_contract() -> None:
+    source = _library_source("storage", "bundled_data_storage")
+
+    assert "module bundled_data_storage" in source
+    assert "parameter" in source and "WIDTH" in source
+    for formal in ("data_in", "data_out", "capture", "release"):
+        assert formal in source
+
+
+def test_bundled_data_matched_delay_has_only_control_formals() -> None:
+    source = _library_source("delay", "bundled_data_matched_delay")
+
+    assert "module bundled_data_matched_delay" in source
+    assert "control_in" in source
+    assert "control_out" in source
+    assert "data_path" not in source
 
 
 def _simulate(tmp_path: Path, name: str, testbench: str) -> None:
@@ -137,6 +161,60 @@ module tb;
     #1; if (release !== 1'b1) $fatal(1, "release holds during mixed reset");
     complete[0] = 1'b0;
     #1; if (release !== 1'b0) $fatal(1, "release clears after all reset");
+    $finish;
+  end
+endmodule
+""")
+
+
+@pytest.mark.parametrize("width, first, second", (
+    (1, "1'b1", "1'b0"),
+    (8, "8'ha5", "8'h3c"),
+))
+def test_bundled_data_storage_transparency_and_release_retention(
+    tmp_path: Path, width: int, first: str, second: str,
+) -> None:
+    _simulate(tmp_path, f"bundled_storage_{width}", f"""
+module tb;
+  reg [{width - 1}:0] data_in = '0;
+  reg capture = 0;
+  reg release = 0;
+  wire [{width - 1}:0] data_out;
+  bundled_data_storage #(.WIDTH({width})) dut (
+    .data_in(data_in), .data_out(data_out), .capture(capture), .release(release)
+  );
+  initial begin
+    capture = 1'b1; data_in = {first};
+    #1; if (data_out !== {first}) $fatal(1, "capture is transparent");
+    release = 1'b1; data_in = {second};
+    #1; if (data_out !== {first}) $fatal(1, "release retains data");
+    release = 1'b0; capture = 1'b0; data_in = {second};
+    #1; if (data_out !== {first}) $fatal(1, "closed storage remains retained");
+    capture = 1'b1;
+    #1; if (data_out !== {second}) $fatal(1, "capture reopens after release");
+    $finish;
+  end
+endmodule
+""")
+
+
+def test_bundled_data_matched_delay_delays_control_transitions_only(tmp_path: Path) -> None:
+    _simulate(tmp_path, "bundled_data_matched_delay", """
+`timescale 1ns/1ps
+module tb;
+  reg control_in = 0;
+  wire control_out;
+  bundled_data_matched_delay #(.DELAY(3)) dut (
+    .control_in(control_in), .control_out(control_out)
+  );
+  initial begin
+    #4; if (control_out !== 1'b0) $fatal(1, "initial low control");
+    control_in = 1'b1;
+    #2; if (control_out !== 1'b0) $fatal(1, "rising control arrived too early");
+    #2; if (control_out !== 1'b1) $fatal(1, "rising control did not propagate");
+    control_in = 1'b0;
+    #2; if (control_out !== 1'b1) $fatal(1, "falling control arrived too early");
+    #2; if (control_out !== 1'b0) $fatal(1, "falling control did not propagate");
     $finish;
   end
 endmodule
