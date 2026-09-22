@@ -175,3 +175,85 @@ def test_external_widths_and_emission_order_are_deterministic() -> None:
     assert first_rtl == emit_async_systemverilog(second)
     assert "input logic [7:0] channel_A_receive_payload" in first_rtl
     assert "output logic [7:0] channel_B_send_payload" in first_rtl
+
+
+def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_enable_payload() -> None:
+    program = _Program()
+    expression = Expression("binary", operator="+", operands=(program.name("a"), Expression("literal", value="1'b1")))
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        Assign(program.variable("y"), expression),
+        If(program.name("select"), program.send("B", program.name("y")), Skip()),
+    )))
+    rtl = emit_async_systemverilog(bound)
+
+    for assignment in bound.assignments:
+        assert f"assign {assignment.target_signal_id} = " in rtl
+    assert "assign combinational_1_value = (a + 1'b1);" in rtl
+    assert "assign storage_0_data_in = y;" in rtl
+    enable = bound.enable_channels[0]
+    assert f"assign {enable.data_signal_id} = select;" in rtl
+
+
+def test_vectorized_controllers_storage_and_delay_formals_emit_exactly_as_bound() -> None:
+    program = _Program()
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        program.send("C", program.name("a")),
+        program.send("D", program.name("b")),
+    )))
+    rtl = emit_async_systemverilog(bound)
+
+    assert ".N(2)" in rtl
+    assert ".input_req(input_join_req)" in rtl
+    assert ".input_ack(input_join_ack)" in rtl
+    assert rtl.count(".M(2)") == 2
+    assert ".launch(output_fork_launch)" in rtl
+    assert ".complete(output_fork_complete)" in rtl
+    assert ".input_req_0(" not in rtl and ".launch_0(" not in rtl
+    for index in range(2):
+        assert f"logic storage_{index}_data_in;" in rtl
+        assert f"logic storage_{index}_data_out;" in rtl
+        assert f".data_in(storage_{index}_data_in)" in rtl
+        assert f".data_out(storage_{index}_data_out)" in rtl
+    assert ".data_path(" not in rtl
+    assert rtl.count(".control_in(") == 2
+    assert rtl.count(".control_out(") == 2
+
+
+def test_enable_channel_is_emitted_as_req_ack_data_without_scalar_enable_interface() -> None:
+    program = _Program()
+    select = program.name("select")
+    bound = _bound(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+    rtl = emit_async_systemverilog(bound)
+
+    for channel in bound.enable_channels:
+        assert f"logic {channel.request_signal_id};" in rtl
+        assert f"logic {channel.acknowledge_signal_id};" in rtl
+        assert f"logic {channel.data_signal_id};" in rtl
+        assert f"assign {channel.data_signal_id} = select;" in rtl
+        assert f".req({channel.request_signal_id})" in rtl
+        assert f".ack({channel.acknowledge_signal_id})" in rtl
+        assert f".data({channel.data_signal_id})" in rtl
+    assert ".enable(" not in rtl
+    assert "_enable;" not in rtl
+
+
+def test_assignments_and_rtl_are_byte_deterministic_for_identical_bound_modules() -> None:
+    first_program = _Program()
+    second_program = _Program()
+    first = _bound(first_program, Sequence((
+        first_program.receive("A", "a"),
+        If(first_program.name("select"), first_program.send("B", first_program.name("a")), Skip()),
+    )))
+    second = _bound(second_program, Sequence((
+        second_program.receive("A", "a"),
+        If(second_program.name("select"), second_program.send("B", second_program.name("a")), Skip()),
+    )))
+
+    assert first.assignments == second.assignments
+    assert emit_async_systemverilog(first) == emit_async_systemverilog(second)
