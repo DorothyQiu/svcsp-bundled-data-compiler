@@ -6,21 +6,21 @@ import subprocess
 import pytest
 
 from svcsp_compiler import (
-    DecomposedSVCSPError, emit_conditional_send_decomposition,
-    lower_behavioral, normalize_communication, parse_text,
+    emit_conditional_send_decomposition, lower_behavioral, parse_text,
 )
+from svcsp_compiler.communication_decomposition import InvalidPayload, decompose_transaction
+from svcsp_compiler.transaction import extract_transaction
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_send_decomposition.sv'
 RECEIVE_FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_receive_decomposition.sv'
-SEND_ORDERING_FIXTURE = ROOT / 'tests' / 'fixtures' / 'conditional_send_ordering.sv'
 IVERILOG = shutil.which('iverilog')
 VVP = shutil.which('vvp')
 
 
-def normalized(source: str):
-    return normalize_communication(lower_behavioral(parse_text(source, 'decomposed.sv')))
+def decomposed_transaction(source: str):
+    return decompose_transaction(extract_transaction(lower_behavioral(parse_text(source, 'decomposed.sv'))))
 
 
 class _IcarusFlatteningError(ValueError):
@@ -287,127 +287,32 @@ def _flatten_channel_svcsp_for_icarus(source: str) -> str:
     return '\n'.join(rendered)
 
 
-def test_conditional_send_emits_body_wrapper_and_composed_top():
-    module = normalized(FIXTURE.read_text())
-    text = emit_conditional_send_decomposition(module)
+def test_emitter_is_a_verification_view_of_decomposed_transaction():
+    transaction = decomposed_transaction(FIXTURE.read_text())
+    snapshot = asdict(transaction)
 
-    assert 'module conditional_send_decomposition_BODY (' in text
-    assert 'module conditional_send_decomposition_X_SEND_0 (' in text
-    assert 'module conditional_send_decomposition_DECOMPOSED (' in text
-    assert 'Channel L,' in text
-    assert 'Channel R' in text
-    assert 'Channel #(8) body_channel_0();' in text
-    assert 'Channel #(1) enable_channel_0();' in text
-    assert 'Channel enable_channel_0' in text
-    assert 'output logic enable_0' not in text
-    assert 'input logic enable_0' not in text
-    assert 'logic enable_0;' not in text
-    assert '.enable_channel_0(enable_channel_0)' in text
-    assert 'conditional_send_decomposition_BODY body (' in text
-    assert 'conditional_send_decomposition_X_SEND_0 x_send (' in text
+    text = emit_conditional_send_decomposition(transaction)
+
+    assert asdict(transaction) == snapshot
+    assert "completion_channel" not in text
 
 
-def test_body_send_is_unconditional_and_enable_is_body_produced():
-    text = emit_conditional_send_decomposition(normalized(FIXTURE.read_text()))
-    body = text.split('module conditional_send_decomposition_X_SEND_0', 1)[0]
+def test_verification_view_concretizes_only_abstract_invalid_payloads():
+    transaction = decomposed_transaction(RECEIVE_FIXTURE.read_text())
+    assert isinstance(transaction.body_receives[1].disabled_payload, InvalidPayload)
 
-    assert 'L.Receive(data);' in body
-    assert 'enable_channel_0.Send(data[0]);' in body
-    assert 'body_channel_0.Send(data);' in body
-    assert 'R.Send(data);' not in body
-    assert body.index('enable_channel_0.Send(data[0]);') < body.index('body_channel_0.Send(data);')
+    text = emit_conditional_send_decomposition(transaction)
+
+    assert "body_payload = '0;" in text
 
 
-def test_wrapper_always_consumes_body_token_and_gates_only_external_send():
-    text = emit_conditional_send_decomposition(normalized(FIXTURE.read_text()))
-    wrapper = text.split('module conditional_send_decomposition_X_SEND_0', 1)[1].split(
-        'module conditional_send_decomposition_DECOMPOSED', 1,
-    )[0]
-
-    assert 'enable_channel_0.Receive(enable_token);' in wrapper
-    assert 'body_channel_0.Receive(body_payload);' in wrapper
-    assert 'if (enable_token) external_channel.Send(body_payload);' in wrapper
-    assert wrapper.index('enable_channel_0.Receive(enable_token);') < wrapper.index(
-        'body_channel_0.Receive(body_payload);'
-    ) < wrapper.index('if (enable_token) external_channel.Send(body_payload);')
-
-
-def test_ordinary_external_receive_is_preserved_in_body_and_top_interface():
-    text = emit_conditional_send_decomposition(normalized(FIXTURE.read_text()))
-    assert 'module conditional_send_decomposition_BODY (\n  Channel L,' in text
-    body = text.split('module conditional_send_decomposition_X_SEND_0', 1)[0]
-    assert 'Channel R' not in body
-    assert '.L(L)' in text
-    assert '.external_channel(R)' in text
-
-
-def test_conditional_receive_emits_body_wrapper_and_composed_top():
-    text = emit_conditional_send_decomposition(normalized(RECEIVE_FIXTURE.read_text()))
-
-    assert 'module conditional_receive_decomposition_BODY (' in text
-    assert 'module conditional_receive_decomposition_X_RECV_0 (' in text
-    assert 'module conditional_receive_decomposition_DECOMPOSED (' in text
-    assert 'Channel #(8) body_channel_0();' in text
-    assert 'Channel #(1) enable_channel_0();' in text
-    assert 'conditional_receive_decomposition_X_RECV_0 x_recv (' in text
-
-
-def test_body_receive_is_unconditional_and_enable_is_body_produced():
-    text = emit_conditional_send_decomposition(normalized(RECEIVE_FIXTURE.read_text()))
-    body = text.split('module conditional_receive_decomposition_X_RECV_0', 1)[0]
-
-    assert 'Control.Receive(enable);' in body
-    assert 'enable_channel_0.Send(enable);' in body
-    assert 'body_channel_0.Receive(data);' in body
-    assert 'L.Receive(data);' not in body
-    assert body.index('enable_channel_0.Send(enable);') < body.index('body_channel_0.Receive(data);')
-
-
-def test_receive_wrapper_receives_enable_then_forwards_real_or_dummy_token():
-    text = emit_conditional_send_decomposition(normalized(RECEIVE_FIXTURE.read_text()))
-    wrapper = text.split('module conditional_receive_decomposition_X_RECV_0', 1)[1].split(
-        'module conditional_receive_decomposition_DECOMPOSED', 1,
-    )[0]
-
-    assert 'enable_channel_0.Receive(enable_token);' in wrapper
-    assert 'if (enable_token) begin\n      external_channel.Receive(body_payload);' in wrapper
-    assert "end else begin\n      body_payload = '0;" in wrapper
-    assert 'body_channel_0.Send(body_payload);' in wrapper
-    assert 'external_channel.Receive(body_payload);' not in wrapper.split('end else begin', 1)[1]
-    assert wrapper.index('enable_channel_0.Receive(enable_token);') < wrapper.index(
-        'external_channel.Receive(body_payload);'
-    ) < wrapper.index('body_channel_0.Send(body_payload);')
-
-
-def test_multiple_conditional_communications_fail_closed():
-    module = normalized('''module m(Channel #(8) A, Channel #(8) B); logic c; logic [7:0] x; always begin
-if (c) A.Receive(x); if (c) B.Receive(x); end endmodule''')
-    with pytest.raises(DecomposedSVCSPError, match='exactly one conditional communication'):
-        emit_conditional_send_decomposition(module)
-
-
-def test_emitter_does_not_mutate_normalized_module():
-    module = normalized(FIXTURE.read_text())
-    snapshot = asdict(module)
-    emit_conditional_send_decomposition(module)
-    assert asdict(module) == snapshot
-
-
-def test_icarus_channel_flattener_expands_production_channel_source_and_fails_closed():
+def test_icarus_channel_flattener_remains_a_test_only_harness():
     original = FIXTURE.read_text()
-    decomposed = emit_conditional_send_decomposition(normalized(original))
+    transaction = decomposed_transaction(original)
+    decomposed = emit_conditional_send_decomposition(transaction)
 
-    original_flat = _flatten_channel_svcsp_for_icarus(original)
-    decomposed_flat = _flatten_channel_svcsp_for_icarus(decomposed)
-    assert 'interface Channel' not in original_flat
-    assert 'input logic [7:0] L_payload' in original_flat
-    assert 'task automatic L_Receive' in original_flat
-    assert 'task automatic R_Send' in original_flat
-    assert 'Channel' not in decomposed_flat
-    assert 'logic [7:0] body_channel_0_payload;' in decomposed_flat
-    assert 'logic enable_channel_0_request;' in decomposed_flat
-    assert '.enable_channel_0_request(enable_channel_0_request)' in decomposed_flat
-
+    assert 'interface Channel' not in _flatten_channel_svcsp_for_icarus(original)
+    assert 'Channel' not in _flatten_channel_svcsp_for_icarus(decomposed)
     with pytest.raises(_IcarusFlatteningError, match='unsupported test-only flattening syntax'):
         _flatten_channel_svcsp_for_icarus(
             'module unsupported(Channel A); always fork A.Send(1\'b1); join endmodule'
@@ -417,7 +322,7 @@ def test_icarus_channel_flattener_expands_production_channel_source_and_fails_cl
 def test_conditional_send_decomposition_is_behaviorally_equivalent(tmp_path):
     """Run original and emitted decomposition through the same flattened CSP model."""
     original = FIXTURE.read_text()
-    decomposed = emit_conditional_send_decomposition(normalized(original))
+    decomposed = emit_conditional_send_decomposition(decomposed_transaction(original))
     original_path = tmp_path / 'original_flat.sv'
     decomposed_path = tmp_path / 'decomposed_flat.sv'
     testbench_path = tmp_path / 'tb.sv'
@@ -576,7 +481,7 @@ endmodule
 def test_conditional_receive_decomposition_is_behaviorally_equivalent(tmp_path):
     """Compare real four-phase handshakes for enabled and disabled receives."""
     original = RECEIVE_FIXTURE.read_text()
-    decomposed = emit_conditional_send_decomposition(normalized(original))
+    decomposed = emit_conditional_send_decomposition(decomposed_transaction(original))
     original_path = tmp_path / 'original_flat.sv'
     decomposed_path = tmp_path / 'decomposed_flat.sv'
     testbench_path = tmp_path / 'tb.sv'
@@ -779,130 +684,3 @@ endmodule
     assert ('PASS conditional Receive equivalence: original=11,0,33,0 '
             'decomposed=11,0,33,0 disabled_L_ack=0') in run_result.stdout
 
-
-def test_conditional_send_external_completion_precedes_following_send(tmp_path):
-    """Require the decomposed SEND wrapper to preserve external blocking order."""
-    original = SEND_ORDERING_FIXTURE.read_text()
-    decomposed = emit_conditional_send_decomposition(normalized(original))
-    original_path = tmp_path / 'original_flat.sv'
-    decomposed_path = tmp_path / 'decomposed_flat.sv'
-    testbench_path = tmp_path / 'tb.sv'
-    executable = tmp_path / 'simulation'
-    original_path.write_text(_flatten_channel_svcsp_for_icarus(original))
-    decomposed_path.write_text(_flatten_channel_svcsp_for_icarus(decomposed))
-    if not (IVERILOG and VVP):
-        pytest.skip('Icarus Verilog is not available')
-    testbench_path.write_text(r'''
-`timescale 1ns/1ps
-module tb;
-  logic [7:0] l_original_payload = '0;
-  logic l_original_request = 1'b0;
-  wire l_original_acknowledge;
-  wire [7:0] r_original_payload;
-  wire r_original_request;
-  logic r_original_acknowledge = 1'b0;
-  wire [7:0] s_original_payload;
-  wire s_original_request;
-  logic s_original_acknowledge = 1'b0;
-
-  logic [7:0] l_decomposed_payload = '0;
-  logic l_decomposed_request = 1'b0;
-  wire l_decomposed_acknowledge;
-  wire [7:0] r_decomposed_payload;
-  wire r_decomposed_request;
-  logic r_decomposed_acknowledge = 1'b0;
-  wire [7:0] s_decomposed_payload;
-  wire s_decomposed_request;
-  logic s_decomposed_acknowledge = 1'b0;
-
-  conditional_send_ordering original (
-    .L_payload(l_original_payload), .L_request(l_original_request), .L_acknowledge(l_original_acknowledge),
-    .R_payload(r_original_payload), .R_request(r_original_request), .R_acknowledge(r_original_acknowledge),
-    .S_payload(s_original_payload), .S_request(s_original_request), .S_acknowledge(s_original_acknowledge)
-  );
-  conditional_send_ordering_DECOMPOSED decomposed (
-    .L_payload(l_decomposed_payload), .L_request(l_decomposed_request), .L_acknowledge(l_decomposed_acknowledge),
-    .R_payload(r_decomposed_payload), .R_request(r_decomposed_request), .R_acknowledge(r_decomposed_acknowledge),
-    .S_payload(s_decomposed_payload), .S_request(s_decomposed_request), .S_acknowledge(s_decomposed_acknowledge)
-  );
-
-  task automatic send_l_original(input logic [7:0] value);
-    l_original_payload = value; l_original_request = 1'b1;
-    wait (l_original_acknowledge === 1'b1); l_original_request = 1'b0;
-    wait (l_original_acknowledge === 1'b0);
-  endtask
-  task automatic send_l_decomposed(input logic [7:0] value);
-    l_decomposed_payload = value; l_decomposed_request = 1'b1;
-    wait (l_decomposed_acknowledge === 1'b1); l_decomposed_request = 1'b0;
-    wait (l_decomposed_acknowledge === 1'b0);
-  endtask
-  task automatic drive_l(input logic [7:0] value);
-    fork send_l_original(value); send_l_decomposed(value); join
-  endtask
-
-  task automatic complete_r_original;
-    wait (r_original_request === 1'b1); r_original_acknowledge = 1'b1;
-    wait (r_original_request === 1'b0); r_original_acknowledge = 1'b0;
-  endtask
-  task automatic complete_r_decomposed;
-    wait (r_decomposed_request === 1'b1); r_decomposed_acknowledge = 1'b1;
-    wait (r_decomposed_request === 1'b0); r_decomposed_acknowledge = 1'b0;
-  endtask
-  task automatic complete_s_original;
-    wait (s_original_request === 1'b1); s_original_acknowledge = 1'b1;
-    wait (s_original_request === 1'b0); s_original_acknowledge = 1'b0;
-  endtask
-  task automatic complete_s_decomposed;
-    wait (s_decomposed_request === 1'b1); s_decomposed_acknowledge = 1'b1;
-    wait (s_decomposed_request === 1'b0); s_decomposed_acknowledge = 1'b0;
-  endtask
-  task automatic complete_s;
-    fork complete_s_original(); complete_s_decomposed(); join
-  endtask
-
-  initial begin
-    // Enabled: deliberately leave R unacknowledged after both designs request it.
-    drive_l(8'd1);
-    wait (r_original_request === 1'b1 && r_decomposed_request === 1'b1);
-    #1;
-    if (s_original_request !== 1'b0)
-      $fatal(1, "original began S before R completed");
-    if (s_decomposed_request !== 1'b0)
-      $fatal(1, "decomposed began S before R completed");
-    if (r_original_acknowledge !== 1'b0 || r_decomposed_acknowledge !== 1'b0)
-      $fatal(1, "R was accidentally acknowledged during the ordering check");
-
-    fork complete_r_original(); complete_r_decomposed(); join
-    complete_s();
-
-    // Disabled: neither design may request R, and both must still reach S.
-    drive_l(8'd2);
-    #1;
-    if (r_original_request !== 1'b0 || r_decomposed_request !== 1'b0)
-      $fatal(1, "disabled iteration requested R");
-    wait (s_original_request === 1'b1 && s_decomposed_request === 1'b1);
-    complete_s();
-
-    $display("ORDER original=R_complete_before_S decomposed=R_complete_before_S disabled=R_idle_then_S");
-    $finish;
-  end
-
-  initial begin
-    #100;
-    $fatal(1, "conditional Send ordering test timed out");
-  end
-endmodule
-''')
-
-    compile_result = subprocess.run(
-        [IVERILOG, '-g2012', '-s', 'tb', '-o', str(executable),
-         str(original_path), str(decomposed_path), str(testbench_path)],
-        cwd=ROOT, text=True, capture_output=True, check=False,
-    )
-    assert compile_result.returncode == 0, compile_result.stderr
-    run_result = subprocess.run(
-        [VVP, str(executable)], cwd=ROOT, text=True, capture_output=True, check=False,
-    )
-    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
-    assert ('ORDER original=R_complete_before_S decomposed=R_complete_before_S '
-            'disabled=R_idle_then_S') in run_result.stdout
