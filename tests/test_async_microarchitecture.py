@@ -328,3 +328,71 @@ def test_nested_and_multiple_conditional_communications_get_distinct_enable_chan
         EnableAvailability.PRE_INPUT,
         EnableAvailability.POST_INPUT,
     }
+
+
+def test_body_stage_has_one_matched_delay_per_output_including_trivial_payloads() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        program.send("B", program.name("a")),
+        program.send("C", Expression("literal", value="1'b0")),
+    )))
+
+    assert len(architecture.matched_delays) == len(architecture.output_fork.outputs) == 2
+    for slot, output in zip(architecture.storage.slots, architecture.output_fork.outputs):
+        requirement = next(item for item in architecture.matched_delays if item.output_port is output)
+        assert requirement.storage_slot is slot
+        assert requirement.input_join is architecture.input_join
+        assert requirement.output_port is output
+
+
+def test_en_receive_stage_contract_is_enable_first_conditional_external_and_unconditional_body() -> None:
+    program = _Program()
+    select = program.name("select")
+    receive = program.receive("A", "a")
+    architecture = _lower(program, Sequence((
+        If(select, receive, Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    stage = architecture.en_receive_stages[0]
+    assert stage.consumes_enable_first is True
+    assert stage.external_receive_when_enabled is True
+    assert stage.body_output_unconditional is True
+    assert stage.disabled_payload is stage.body_receive.disabled_payload
+    assert stage.requires_payload_storage is True
+    assert stage.requires_body_output_matched_delay is True
+
+
+def test_en_send_stage_contract_always_consumes_body_and_only_delays_enabled_external_output() -> None:
+    program = _Program()
+    send = program.send("B", Expression("literal", value="1'b0"))
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), send, Skip()),
+    )))
+
+    stage = architecture.en_send_stages[0]
+    assert stage.consumes_enable_first is True
+    assert stage.body_input_unconditional is True
+    assert stage.external_send_when_enabled is True
+    assert stage.suppresses_external_when_disabled is True
+    assert stage.locally_consumes_when_disabled is True
+    assert not hasattr(stage, "disabled_payload")
+    assert not hasattr(stage, "invalid_payload")
+    assert stage.requires_payload_storage is True
+    assert stage.requires_enabled_external_output_matched_delay is True
+    assert not hasattr(stage, "requires_disabled_output_matched_delay")
+
+
+def test_enable_stage_contracts_preserve_the_selected_half_buffer_four_phase_bundled_data_target() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture = _lower(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    assert architecture.buffer_style is BufferStyle.HALF_BUFFER
+    assert architecture.protocol is HandshakeProtocol.FOUR_PHASE
+    assert architecture.timing_model is TimingModel.BUNDLED_DATA

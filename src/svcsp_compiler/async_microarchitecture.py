@@ -74,6 +74,11 @@ class EnReceiveStage:
     body_receive: BodyReceive
     input_port: InputPort
     disabled_payload: InvalidPayload
+    consumes_enable_first: bool = True
+    external_receive_when_enabled: bool = True
+    body_output_unconditional: bool = True
+    requires_payload_storage: bool = True
+    requires_body_output_matched_delay: bool = True
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,13 @@ class EnSendStage:
     enable_channel: EnableChannel
     body_send: BodySend
     output_port: OutputPort
+    consumes_enable_first: bool = True
+    body_input_unconditional: bool = True
+    external_send_when_enabled: bool = True
+    suppresses_external_when_disabled: bool = True
+    locally_consumes_when_disabled: bool = True
+    requires_payload_storage: bool = True
+    requires_enabled_external_output_matched_delay: bool = True
 
 
 @dataclass(frozen=True)
@@ -226,8 +238,6 @@ def _matched_delays(combinational: tuple[RegionOperation, ...], storage: StageSt
                   if isinstance(operation.operation, behavioral.Assign) and _nontrivial(operation.operation.value)]
     operations.extend(slot.body_send.source for slot in storage.slots
                       if _nontrivial(slot.body_send.source.operation.value))
-    if not operations:
-        return ()
     return tuple(
         MatchedDelayRequirement(
             f'matched_delay_{index}', tuple(operations), slot, input_join, slot.retained_until,
