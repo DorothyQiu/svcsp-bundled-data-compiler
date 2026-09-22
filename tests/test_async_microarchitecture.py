@@ -396,3 +396,83 @@ def test_enable_stage_contracts_preserve_the_selected_half_buffer_four_phase_bun
     assert architecture.buffer_style is BufferStyle.HALF_BUFFER
     assert architecture.protocol is HandshakeProtocol.FOUR_PHASE
     assert architecture.timing_model is TimingModel.BUNDLED_DATA
+
+
+def test_every_enable_channel_has_one_unconditional_body_enable_send_for_its_exact_enable() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture = _lower(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    assert len(architecture.enable_channels) == 2
+    for channel in architecture.enable_channels:
+        assert channel.producer.enable is channel.enable
+        assert channel.producer.condition is channel.enable.condition
+        assert channel.producer.unconditional is True
+        assert channel.producer.transaction is architecture.validated
+
+
+def test_pre_input_enable_producer_precedes_join_and_is_a_body_control_output() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture = _lower(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    channel = next(item for item in architecture.enable_channels
+                   if item.availability is EnableAvailability.PRE_INPUT)
+    assert channel.producer.depends_on_input_join is False
+    assert channel.producer.available_before_controlled_body_input is True
+    assert channel.producer.transaction is architecture.validated
+    assert channel.producer.is_body_control_output is True
+    assert channel not in architecture.output_fork.outputs
+
+
+def test_post_input_enable_producer_is_unconditional_body_control_output_in_completion() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), program.send("B", Expression("literal", value="1'b0")), Skip()),
+    )))
+
+    channel = architecture.enable_channels[0]
+    assert channel.availability is EnableAvailability.POST_INPUT
+    assert channel.producer.depends_on_input_join is True
+    assert channel.producer.unconditional is True
+    assert channel.producer.is_body_control_output is True
+    assert channel.producer.participates_in_body_completion is True
+
+
+def test_conditional_send_has_distinct_unconditional_enable_and_payload_body_communications() -> None:
+    program = _Program()
+    send = program.send("B", Expression("literal", value="1'b0"))
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), send, Skip()),
+    )))
+
+    channel = architecture.enable_channels[0]
+    stage = architecture.en_send_stages[0]
+    assert channel.producer is not stage.body_send
+    assert channel.producer.unconditional is True
+    assert stage.body_input_unconditional is True
+    assert stage.suppresses_external_when_disabled is True
+
+
+def test_conditional_receive_has_pre_input_enable_and_one_always_returned_body_token() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture = _lower(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    channel = next(item for item in architecture.enable_channels
+                   if item.availability is EnableAvailability.PRE_INPUT)
+    stage = architecture.en_receive_stages[0]
+    assert channel.producer.unconditional is True
+    assert stage.body_output_unconditional is True
+    assert stage.disabled_payload is stage.body_receive.disabled_payload

@@ -56,6 +56,21 @@ class OutputPort:
 
 
 @dataclass(frozen=True)
+class EnableTokenProducer:
+    """One unconditional BODY control send carrying an M4 Enable condition."""
+
+    enable: Enable
+    condition: behavioral.Expression
+    transaction: SemanticallyValidatedTransaction
+    unconditional: bool
+    depends_on_input_join: bool
+    available_before_controlled_body_input: bool
+    is_body_control_output: bool
+    participates_in_transaction_completion: bool
+    participates_in_body_completion: bool
+
+
+@dataclass(frozen=True)
 class EnableChannel:
     """One concrete one-bit transport for one M4 logical Enable occurrence."""
 
@@ -63,6 +78,7 @@ class EnableChannel:
     enable: Enable
     width: behavioral.PayloadWidth
     availability: EnableAvailability
+    producer: EnableTokenProducer
 
 
 @dataclass(frozen=True)
@@ -174,9 +190,9 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
     ))
     combinational = CombinationalBlock(decomposed.body_combinational)
     matched_delays = _matched_delays(combinational.operations, storage, input_join)
-    enable_channels, en_receive_stages, en_send_stages = _enable_stages(decomposed.en_receives,
-                                                                          decomposed.en_sends,
-                                                                          inputs, outputs)
+    enable_channels, en_receive_stages, en_send_stages = _enable_stages(
+        validated, decomposed.en_receives, decomposed.en_sends, inputs, outputs,
+    )
     return AsyncMicroarchitecture(
         validated,
         HandshakeProtocol.FOUR_PHASE,
@@ -193,7 +209,8 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
     )
 
 
-def _enable_stages(en_receives: tuple[EnReceive, ...], en_sends: tuple[EnSend, ...],
+def _enable_stages(validated: SemanticallyValidatedTransaction,
+                   en_receives: tuple[EnReceive, ...], en_sends: tuple[EnSend, ...],
                    inputs: tuple[InputPort, ...], outputs: tuple[OutputPort, ...]) -> tuple[
                        tuple[EnableChannel, ...], tuple[EnReceiveStage, ...], tuple[EnSendStage, ...]]:
     """Lower each M4 Enable occurrence independently, even for equal guards."""
@@ -205,9 +222,13 @@ def _enable_stages(en_receives: tuple[EnReceive, ...], en_sends: tuple[EnSend, .
     output_by_send = {output_port.body_send: output_port for output_port in outputs}
 
     for adapter in en_receives:
+        producer = EnableTokenProducer(
+            adapter.enable, adapter.enable.condition, validated, True,
+            False, True, True, True, False,
+        )
         channel = EnableChannel(
             f'enable_channel_{len(channels)}', adapter.enable, behavioral.ONE_BIT,
-            EnableAvailability.PRE_INPUT,
+            EnableAvailability.PRE_INPUT, producer,
         )
         channels.append(channel)
         body_receive = adapter.body_receive
@@ -219,9 +240,13 @@ def _enable_stages(en_receives: tuple[EnReceive, ...], en_sends: tuple[EnSend, .
         ))
 
     for adapter in en_sends:
+        producer = EnableTokenProducer(
+            adapter.enable, adapter.enable.condition, validated, True,
+            True, False, True, True, True,
+        )
         channel = EnableChannel(
             f'enable_channel_{len(channels)}', adapter.enable, behavioral.ONE_BIT,
-            EnableAvailability.POST_INPUT,
+            EnableAvailability.POST_INPUT, producer,
         )
         channels.append(channel)
         body_send = adapter.body_send
