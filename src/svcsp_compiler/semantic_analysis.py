@@ -71,6 +71,10 @@ class _Analyzer:
             if target is not None:
                 self.receive_producers.setdefault(target, set()).add(body_receive.source)
         self.enables_by_source = {enable.source: enable for enable in decomposed.enables}
+        # External inputs are module-owned declarations.  Membership must use
+        # object identity: a local declaration with the same spelling is not
+        # an external input.
+        self.external_inputs = transaction.behavioral.external_inputs
         self.dependencies: list[SemanticDependency] = []
         self._dependency_keys: set[tuple[object, object, SemanticDependencyKind]] = set()
         self.validity = tuple(
@@ -185,10 +189,17 @@ class _Analyzer:
         for variable in _expression_variables(expression):
             reaching = definitions.get(variable, set())
             if not reaching:
-                continue  # Module inputs and control variables have no local definition.
-            if receive_enable and any(isinstance(definition.source.operation, behavioral.Receive)
+                if not any(variable is external for external in self.external_inputs):
+                    raise SemanticValidationError(
+                        f'variable read has no reaching local definition and is not an explicit external input: '
+                        f'{variable.name}'
+                    )
+                continue
+            if receive_enable and any(isinstance(definition.source.operation, (behavioral.Receive, behavioral.Assign))
                                       for definition in reaching):
-                raise SemanticValidationError('Receive enable depends on another Receive data')
+                raise SemanticValidationError(
+                    'Conditional Receive enable may depend only on literals, parameters, and explicit external inputs'
+                )
             if not _definitions_cover(reaching, guard):
                 raise SemanticValidationError(f'conditional receive data {variable.name} is not valid under this guard')
             if target is not None:

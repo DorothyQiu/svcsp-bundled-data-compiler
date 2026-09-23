@@ -10,6 +10,7 @@ from svcsp_compiler.behavioral_ir import (
     Expression,
     If,
     ONE_BIT,
+    Parameter,
     Parallel,
     PayloadType,
     Receive,
@@ -27,7 +28,7 @@ from svcsp_compiler.semantic_analysis import (
     SemanticallyValidatedTransaction,
     analyze_semantics,
 )
-from svcsp_compiler.transaction import extract_transaction
+from svcsp_compiler.transaction import RegionOperation, StructurallyValidatedTransaction, extract_transaction
 
 
 _TYPE = PayloadType("logic", ONE_BIT)
@@ -36,10 +37,28 @@ _TYPE = PayloadType("logic", ONE_BIT)
 class _Program:
     def __init__(self) -> None:
         self.variables: dict[str, Variable] = {}
+        self.external_inputs: dict[str, Variable] = {}
 
     def variable(self, name: str) -> Variable:
         return self.variables.setdefault(
-            name, Variable(name, (), SourceLocation("semantic.sv", 1, 1), _TYPE),
+            name,
+            Variable(
+                name,
+                (),
+                SourceLocation("semantic.sv", 1, 1),
+                _TYPE,
+            ),
+        )
+
+    def external_input(self, name: str) -> Variable:
+        return self.external_inputs.setdefault(
+            name,
+            Variable(
+                name,
+                ("external_input",),
+                SourceLocation("semantic.sv", 1, 1),
+                _TYPE,
+            ),
         )
 
     def name(self, name: str) -> Expression:
@@ -47,7 +66,8 @@ class _Program:
         return Expression("name", value=name, variable=variable)
 
     def condition(self, name: str) -> Expression:
-        return self.name(name)
+        variable = self.external_input(name)
+        return Expression("name", value=name, variable=variable)
 
     def receive(self, channel: str, target: str) -> Receive:
         return Receive(ChannelEndpoint(channel), self.variable(target))
@@ -59,8 +79,13 @@ class _Program:
         return Assign(self.variable(target), value)
 
     def module(self, body) -> BehavioralModule:
-        return BehavioralModule("semantic", body, (), tuple(self.variables.values()))
-
+        return BehavioralModule(
+            "semantic",
+            body,
+            (),
+            tuple(self.variables.values()),
+            external_inputs=tuple(self.external_inputs.values()),
+        )
 
 def _binary(operator: str, left: Expression, right: Expression) -> Expression:
     return Expression("binary", operator=operator, operands=(left, right))
@@ -316,5 +341,127 @@ def test_parallel_receive_enable_cannot_depend_on_another_receive_payload() -> N
         program.send("C", Expression("literal", value="1'b0")),
     ))
 
-    with pytest.raises(SemanticValidationError, match="Receive"):
+    with pytest.raises(SemanticValidationError, match="no reaching local definition"):
         _analyze(program, body)
+
+
+def test_external_input_pre_input_guard_is_accepted() -> None:
+    program = _Program()
+    body = Sequence((
+        If(program.condition("select"), program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    ))
+
+    _analyze(program, body)
+
+
+def test_pre_input_guard_expression_with_multiple_external_inputs_is_accepted() -> None:
+    program = _Program()
+    body = Sequence((
+        If(_binary("&&", program.condition("select"), program.condition("enable")),
+           program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    ))
+
+    _analyze(program, body)
+
+
+def test_undefined_local_pre_input_guard_is_rejected() -> None:
+    program = _Program()
+    body = Sequence((
+        If(program.name("undefined"), program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    ))
+
+    with pytest.raises(SemanticValidationError, match="no reaching local definition"):
+        _analyze(program, body)
+
+
+def test_receive_data_dependent_conditional_receive_is_rejected() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        If(_select_bit(program.name("a")), program.receive("B", "b"), Skip()),
+        program.send("C", Expression("literal", value="1'b0")),
+    ))
+
+    with pytest.raises(SemanticValidationError, match="Receive enable"):
+        _analyze(program, body)
+
+
+def test_assign_result_dependent_conditional_receive_is_rejected() -> None:
+    program = _Program()
+    assignment = program.assign("control", Expression("literal", value="1'b1"))
+    conditional_receive = program.receive("A", "a")
+    send = program.send("B", Expression("literal", value="1'b0"))
+    body = Sequence((
+        assignment,
+        If(program.name("control"), conditional_receive, Skip()),
+        send,
+    ))
+    # M3 normally rejects this source ordering.  Construct the M3 input
+    # directly so this test exercises M5's fail-closed PRE_INPUT check.
+    transaction = StructurallyValidatedTransaction(
+        program.module(body),
+        (RegionOperation(conditional_receive, (1, "then")),),
+        (RegionOperation(assignment, (0,)),),
+        (RegionOperation(send, (2,)),),
+        (),
+    )
+
+    with pytest.raises(SemanticValidationError, match="Conditional Receive enable"):
+        analyze_semantics(decompose_transaction(transaction))
+
+
+def test_unconditional_receive_data_conditional_send_guard_is_accepted() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        If(_select_bit(program.name("a")),
+           program.send("B", Expression("literal", value="1'b0")), Skip()),
+    ))
+
+    _analyze(program, body)
+
+
+def test_locally_computed_conditional_send_guard_is_accepted() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        program.assign("control", _select_bit(program.name("a"))),
+        If(program.name("control"), program.send("B", Expression("literal", value="1'b0")), Skip()),
+    ))
+
+    _analyze(program, body)
+
+
+def test_parameter_pre_input_guard_remains_legal() -> None:
+    program = _Program()
+    parameter = Parameter("SELECT", "semantic", SourceLocation("semantic.sv", 1, 1))
+    parameter_guard = Expression("parameter", value="SELECT", parameter=parameter)
+    body = Sequence((
+        If(parameter_guard, program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    ))
+    module = BehavioralModule(
+        "semantic", body, (), tuple(program.variables.values()), parameters=(parameter,),
+    )
+
+    analyze_semantics(decompose_transaction(extract_transaction(module)))
+
+
+def test_same_name_local_variable_is_not_an_external_input_by_identity() -> None:
+    program = _Program()
+    external = Variable("select", (), SourceLocation("semantic.sv", 1, 1), _TYPE)
+    local = Variable("select", ("local",), SourceLocation("semantic.sv", 1, 1), _TYPE)
+    local_guard = Expression("name", value="select", variable=local)
+    body = Sequence((
+        If(local_guard, program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    ))
+    module = BehavioralModule(
+        "semantic", body, (), tuple(program.variables.values()) + (local,), external_inputs=(external,),
+    )
+
+    with pytest.raises(SemanticValidationError, match="no reaching local definition"):
+        analyze_semantics(decompose_transaction(extract_transaction(module)))
