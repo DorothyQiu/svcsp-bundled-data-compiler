@@ -144,6 +144,7 @@ class BehavioralModule:
     channels: tuple[ChannelEndpoint, ...]
     variables: tuple[Variable, ...]
     parameters: tuple[Parameter, ...] = ()
+    external_inputs: tuple[Variable, ...] = ()
     location: SourceLocation | None = None
 
 
@@ -444,8 +445,13 @@ def lower_behavioral(frontend: dict) -> BehavioralModule:
         Variable(variable['name'], tuple(variable['scope']), _location(variable), _payload_type(variable.get('payload_type')))
         for variable in frontend['variables']
     )
+    external_inputs = tuple(
+        Variable(item['name'], tuple(item['scope']), _location(item), _payload_type(item.get('payload_type')))
+        for item in frontend.get('external_inputs', [])
+    )
     declarations = {(variable.name, variable.location): variable for variable in variables}
     scope = {variable.name: variable for variable in variables if variable.scope == ('module',)}
+    scope.update({item.name: item for item in external_inputs})
     channels = tuple(ChannelEndpoint(channel['name'], location=_location(channel),
                                      payload_type=_payload_type(channel.get('payload_type')))
                      for channel in frontend['channels'])
@@ -458,6 +464,7 @@ def lower_behavioral(frontend: dict) -> BehavioralModule:
         body=_statement(frontend['always']['statement'], scope, declarations, channel_payloads, parameter_map),
         channels=channels,
         variables=variables,
+        external_inputs=external_inputs,
         parameters=parameters,
         location=_location(frontend),
     )

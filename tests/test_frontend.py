@@ -76,6 +76,43 @@ logic x; always begin A.Receive(x); B.Send(x); C[0].Receive(x); C[1].Send(x); en
     assert result['channels'][2]['dimensions']
 
 
+def test_explicit_scalar_and_packed_data_inputs_are_preserved_separately_from_channels():
+    result = parse_text('''module m(input logic sel, input logic [7:0] control, interface A);
+logic x; always if (sel) A.Send(control); endmodule''')
+
+    assert directions(result) == {'A': 'output'}
+    assert [item['name'] for item in result['external_inputs']] == ['sel', 'control']
+    assert [item['payload_type']['width']['bits'] for item in result['external_inputs']] == [1, 8]
+    assert [item['name'] for item in result['variables']] == ['x']
+
+
+@pytest.mark.parametrize('declaration', (
+    'output logic result',
+    'inout logic control',
+))
+def test_non_input_data_ports_are_rejected(declaration):
+    with pytest.raises(
+        FrontendError,
+        match='only input data ports are supported',
+    ):
+        parse_text(f'module m({declaration}); always begin end endmodule')
+
+
+@pytest.mark.parametrize('source', (
+    '''module m(input logic sel);
+always sel = 1'b0;
+endmodule''',
+    '''module m(input logic sel, interface A);
+always A.Receive(sel);
+endmodule''',
+))
+def test_external_inputs_cannot_be_assignment_or_receive_targets(source):
+    with pytest.raises(
+        FrontendError,
+        match='expected a local variable receive/assignment target',
+    ):
+        parse_text(source)
+
 def test_custom_type_and_escaped_identifiers():
     result = parse_text(r'module \m.name (Link \in.port ); logic x; always \in.port .Receive(x); endmodule', channel_types=('Link',))
     assert result['module'] == 'm.name'
@@ -136,7 +173,6 @@ C.Send(select ? ~a[0] : {a[3:0], b[3:0]} + b[7:0]); endmodule''')
     ('module m(interface C); always C.Send(x); endmodule', 'declared local variable'),
     ('module m(interface C); logic x; always begin bit C; C.Send(x); end endmodule', 'declared channel'),
     ('module m; logic x,x; always begin end endmodule', 'duplicate declaration'),
-    ('module m(input logic x); always begin end endmodule', 'channel/interface port'),
     ('module m; int x; always begin end endmodule', 'logic/reg/bit'),
     ('module m; logic x; always x = helper(); endmodule', 'unsupported data expression'),
 ])

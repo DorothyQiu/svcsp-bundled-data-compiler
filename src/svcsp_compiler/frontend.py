@@ -203,7 +203,7 @@ def _extract(tree, channel_types):
                     'default': _dimension_expression(initializer['expr']) if initializer else None,
                     'location': declarator['location'],
                 }
-    channels, variables, operations = [], [], []
+    channels, external_inputs, variables, operations = [], [], [], []
     symbols = {}
     types = set(channel_types)
 
@@ -214,6 +214,7 @@ def _extract(tree, channel_types):
 
     ports = header.get('ports')
     inherited = None
+    inherited_external_input_type = None
     if ports:
         if ports['kind'] != 'AnsiPortList':
             _fail(ports, 'only ANSI channel/interface ports are supported')
@@ -222,6 +223,36 @@ def _extract(tree, channel_types):
             if not decl:
                 _fail(port, 'unsupported port declaration')
             dtype = h.get('dataType', {})
+            external_input_type = None
+            if h.get('kind') == 'VariablePortHeader':
+                direction = h.get('direction')
+                if direction and direction != 'input':
+                    _fail(port, 'only input data ports are supported')
+                if direction == 'input':
+                    if dtype.get('kind') not in {'LogicType', 'RegType', 'BitType'} or h.get('varKeyword'):
+                        _fail(port, 'only input logic/reg/bit data ports are supported')
+                    external_input_type = _payload_type(dtype, parameters)
+                    inherited_external_input_type = external_input_type
+                elif (dtype.get('kind') == 'ImplicitType' and
+                      inherited_external_input_type is not None):
+                    external_input_type = inherited_external_input_type
+            if external_input_type is not None:
+                if decl.get('initializer'):
+                    _fail(decl, 'external input initializers are not supported')
+                if decl.get('dimensions'):
+                    _fail(decl, 'external input unpacked dimensions are not supported')
+                name = decl['name']
+                declare(name, 'external_input', decl, symbols)
+                external_inputs.append({
+                    'name': name,
+                    'type': dtype,
+                    'payload_type': external_input_type,
+                    'scope': ['external_input'],
+                    'location': decl['location'],
+                })
+                inherited = None
+                continue
+            inherited_external_input_type = None
             implicit = (h.get('kind') == 'VariablePortHeader'
                         and dtype.get('kind') == 'ImplicitType'
                         and set(dtype) <= {'kind', 'location'}
@@ -255,13 +286,15 @@ def _extract(tree, channel_types):
                 _fail(node, f'unsupported data expression: {kind}')
             if kind in {'IdentifierName', 'IdentifierSelectName'}:
                 name = node['identifier']
-                if scope.get(name) != 'variable' and name not in parameters:
+                if scope.get(name) not in {'variable', 'external_input'} and name not in parameters:
                     _fail(node, f'expected a declared local variable: {name}')
 
     def target(expr, scope):
         while expr['kind'] == 'ParenthesizedExpression':
             expr = expr['expression']
         if expr['kind'] not in {'IdentifierName', 'IdentifierSelectName'}:
+            _fail(expr, 'expected a local variable receive/assignment target')
+        if scope.get(expr['identifier']) != 'variable':
             _fail(expr, 'expected a local variable receive/assignment target')
         expression(expr, scope)
 
@@ -369,7 +402,7 @@ def _extract(tree, channel_types):
         roles = {'input' if op['method'] == 'Receive' else 'output' for op in channel['operations']}
         channel['direction'] = 'bidirectional' if len(roles) == 2 else next(iter(roles), 'unknown')
     return {'module': header['name'], 'location': module['location'], 'parameters': list(parameters.values()),
-            'variables': variables,
+            'external_inputs': external_inputs, 'variables': variables,
             'channels': channels, 'operations': operations, 'always': process, 'syntax': module,
             'warnings': DiagnosticEngine.reportAll(tree.sourceManager, tree.diagnostics)}
 

@@ -65,6 +65,18 @@ if (x) A.Send(x); else B.Send(x); endmodule''')
     assert isinstance(ir.body.else_branch, Send)
 
 
+def test_external_input_identity_is_distinct_from_local_variables_and_used_by_expressions():
+    ir = lower('''module m(input logic sel, interface A, B); logic x; always
+if (sel) A.Receive(x); else B.Receive(x); endmodule''')
+
+    external = ir.external_inputs[0]
+    assert external.name == 'sel' and external.payload_type.width.bits == 1
+    assert external not in ir.variables
+    assert ir.variables[0].name == 'x'
+    assert isinstance(ir.body, If)
+    assert ir.body.condition.variable is external
+
+
 def test_conditional_send_remains_inside_if():
     ir = lower('''module m(interface L, R); logic data; always begin
 L.Receive(data); if (data) R.Send(data); else data = data; end endmodule''')
