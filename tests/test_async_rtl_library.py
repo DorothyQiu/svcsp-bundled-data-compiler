@@ -233,30 +233,32 @@ def test_four_phase_enable_sender_declares_the_channel_sender_contract() -> None
         assert formal in source
 
 
-def test_en_receive_stage_declares_the_width_parameterized_three_channel_contract() -> None:
-    source = _controller_source("en_receive_stage")
+def test_en_receive_controller_declares_control_storage_and_raw_request_contract() -> None:
+    source = _controller_source("en_receive_controller")
 
-    assert "module en_receive_stage" in source
+    assert "module en_receive_controller" in source
     assert "parameter" in source and "WIDTH" in source
     for formal in (
         "enable_req", "enable_ack", "enable_data",
         "external_req", "external_ack", "external_data",
-        "body_req", "body_ack", "body_data",
+        "body_raw_req", "body_ack", "storage_data", "storage_enable",
     ):
         assert formal in source
+    assert "output reg  [WIDTH-1:0] body_data" not in source
 
 
-def test_en_send_stage_declares_the_width_parameterized_three_channel_contract() -> None:
-    source = _controller_source("en_send_stage")
+def test_en_send_controller_declares_control_storage_and_raw_request_contract() -> None:
+    source = _controller_source("en_send_controller")
 
-    assert "module en_send_stage" in source
+    assert "module en_send_controller" in source
     assert "parameter" in source and "WIDTH" in source
     for formal in (
         "enable_req", "enable_ack", "enable_data",
         "body_req", "body_ack", "body_data",
-        "external_req", "external_ack", "external_data",
+        "external_raw_req", "external_ack", "storage_data", "storage_enable",
     ):
         assert formal in source
+    assert "output reg  [WIDTH-1:0] external_data" not in source
 
 
 def _simulate(tmp_path: Path, name: str, testbench: str) -> None:
@@ -446,7 +448,7 @@ endmodule
     (1, "1'b1", "1'b0"),
     (8, "8'ha5", "8'h3c"),
 ))
-def test_en_receive_stage_handles_enabled_and_disabled_body_tokens(
+def test_en_receive_controller_uses_structural_storage_and_delayed_body_request(
     tmp_path: Path, width: int, first: str, second: str,
 ) -> None:
     _simulate(tmp_path, f"en_receive_{width}", f"""
@@ -454,12 +456,19 @@ module tb;
   reg enable_req = 0, enable_data = 0;
   reg external_req = 0, body_ack = 0;
   reg [{width - 1}:0] external_data = '0;
-  wire enable_ack, external_ack, body_req;
-  wire [{width - 1}:0] body_data;
-  en_receive_stage #(.WIDTH({width})) dut (
+  wire enable_ack, external_ack, body_raw_req, body_req, storage_enable;
+  wire [{width - 1}:0] storage_data, body_data;
+  en_receive_controller #(.WIDTH({width})) controller (
     .enable_req(enable_req), .enable_ack(enable_ack), .enable_data(enable_data),
     .external_req(external_req), .external_ack(external_ack), .external_data(external_data),
-    .body_req(body_req), .body_ack(body_ack), .body_data(body_data)
+    .body_raw_req(body_raw_req), .body_ack(body_ack),
+    .storage_data(storage_data), .storage_enable(storage_enable)
+  );
+  bundled_data_latch_bank #(.WIDTH({width})) storage (
+    .data_in(storage_data), .storage_enable(storage_enable), .data_out(body_data)
+  );
+  bundled_data_matched_delay #(.DELAY(0)) delay (
+    .control_in(body_raw_req), .control_out(body_req)
   );
   initial begin
     #1; if ({{enable_ack, external_ack, body_req}} !== 3'b000) $fatal(1, "initial idle");
@@ -469,10 +478,10 @@ module tb;
     #1; if (enable_ack !== 1'b0) $fatal(1, "enable reset");
     external_data = {first}; external_req = 1'b1;
     #1; if (external_ack !== 1'b1 || body_req !== 1'b1 || body_data !== {first}) $fatal(1, "enabled receive missing");
-    external_data = {second};
-    #1; if (body_data !== {first}) $fatal(1, "body payload was not retained");
     external_req = 1'b0;
     #1; if (external_ack !== 1'b0) $fatal(1, "external reset");
+    external_data = {second};
+    #1; if (body_data !== {first}) $fatal(1, "structural BODY storage did not retain payload");
     body_ack = 1'b1;
     #1; if (body_req !== 1'b0) $fatal(1, "body request reset");
     body_ack = 1'b0;
@@ -494,7 +503,7 @@ endmodule
     (1, "1'b1", "1'b0"),
     (8, "8'ha5", "8'h3c"),
 ))
-def test_en_send_stage_consumes_body_before_conditional_external_send(
+def test_en_send_controller_uses_structural_storage_and_delayed_external_request(
     tmp_path: Path, width: int, first: str, second: str,
 ) -> None:
     _simulate(tmp_path, f"en_send_{width}", f"""
@@ -502,22 +511,29 @@ module tb;
   reg enable_req = 0, enable_data = 0;
   reg body_req = 0, external_ack = 0;
   reg [{width - 1}:0] body_data = '0;
-  wire enable_ack, body_ack, external_req;
-  wire [{width - 1}:0] external_data;
-  en_send_stage #(.WIDTH({width})) dut (
+  wire enable_ack, body_ack, external_raw_req, external_req, storage_enable;
+  wire [{width - 1}:0] storage_data, external_data;
+  en_send_controller #(.WIDTH({width})) controller (
     .enable_req(enable_req), .enable_ack(enable_ack), .enable_data(enable_data),
     .body_req(body_req), .body_ack(body_ack), .body_data(body_data),
-    .external_req(external_req), .external_ack(external_ack), .external_data(external_data)
+    .external_raw_req(external_raw_req), .external_ack(external_ack),
+    .storage_data(storage_data), .storage_enable(storage_enable)
+  );
+  bundled_data_latch_bank #(.WIDTH({width})) storage (
+    .data_in(storage_data), .storage_enable(storage_enable), .data_out(external_data)
+  );
+  bundled_data_matched_delay #(.DELAY(0)) delay (
+    .control_in(external_raw_req), .control_out(external_req)
   );
   initial begin
     body_data = {first}; body_req = 1'b1;
     #1; if (body_ack !== 1'b0 || external_req !== 1'b0) $fatal(1, "body accepted before enable");
     enable_data = 1'b1; enable_req = 1'b1;
     #1; if (enable_ack !== 1'b1 || body_ack !== 1'b1 || external_req !== 1'b1 || external_data !== {first}) $fatal(1, "enabled send missing");
-    body_data = {second};
-    #1; if (external_data !== {first}) $fatal(1, "external payload was not retained");
     body_req = 1'b0;
     #1; if (body_ack !== 1'b0) $fatal(1, "body acknowledgement reset");
+    body_data = {second};
+    #1; if (external_data !== {first}) $fatal(1, "structural external storage did not retain payload");
     enable_req = 1'b0;
     #1; if (enable_ack !== 1'b0) $fatal(1, "enable acknowledgement reset");
     external_ack = 1'b1;

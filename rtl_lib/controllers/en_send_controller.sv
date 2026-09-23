@@ -1,7 +1,7 @@
-// Conditional send micropipeline stage.  It captures and completes the BODY
-// transfer before any enabled external transfer has completed, making this a
-// half-buffer between BODY and the external channel.
-module en_send_stage #(
+// Behavioral EN_SEND control.  Payload retention is supplied by the bound
+// structural latch bank; this controller exposes only its capture data/control
+// and the raw outgoing external request.
+module en_send_controller #(
     parameter integer WIDTH = 1
 ) (
     input  wire             enable_req,
@@ -10,21 +10,26 @@ module en_send_stage #(
     input  wire             body_req,
     output reg              body_ack,
     input  wire [WIDTH-1:0] body_data,
-    output reg              external_req,
+    output reg              external_raw_req,
     input  wire             external_ack,
-    output reg  [WIDTH-1:0] external_data
+    output wire [WIDTH-1:0] storage_data,
+    output wire             storage_enable
 );
     localparam IDLE = 0, WAIT_BODY = 1, ACTIVE = 2;
     integer state;
     reg enabled;
+
+    // BODY holds its payload while body_req is asserted.  The latch closes
+    // when body_ack returns low after the BODY request has returned to zero.
+    assign storage_data = body_data;
+    assign storage_enable = body_ack;
 
     initial begin
         state = IDLE;
         enabled = 1'b0;
         enable_ack = 1'b0;
         body_ack = 1'b0;
-        external_req = 1'b0;
-        external_data = {WIDTH{1'b0}};
+        external_raw_req = 1'b0;
     end
 
     always @(*) begin
@@ -34,10 +39,9 @@ module en_send_stage #(
                     enabled = enable_data;
                     enable_ack = 1'b1;
                     if (body_req) begin
-                        external_data = body_data;
                         body_ack = 1'b1;
                         if (enable_data)
-                            external_req = 1'b1;
+                            external_raw_req = 1'b1;
                         state = ACTIVE;
                     end else begin
                         state = WAIT_BODY;
@@ -48,10 +52,9 @@ module en_send_stage #(
                 if (!enable_req)
                     enable_ack = 1'b0;
                 if (body_req) begin
-                    external_data = body_data;
                     body_ack = 1'b1;
                     if (enabled)
-                        external_req = 1'b1;
+                        external_raw_req = 1'b1;
                     state = ACTIVE;
                 end
             end
@@ -60,10 +63,10 @@ module en_send_stage #(
                     enable_ack = 1'b0;
                 if (body_ack && !body_req)
                     body_ack = 1'b0;
-                if (enabled && external_req && external_ack)
-                    external_req = 1'b0;
+                if (enabled && external_raw_req && external_ack)
+                    external_raw_req = 1'b0;
                 if (!enable_req && !enable_ack && !body_req && !body_ack &&
-                    (!enabled || (!external_req && !external_ack))) begin
+                    (!enabled || (!external_raw_req && !external_ack))) begin
                     state = IDLE;
                     enabled = 1'b0;
                 end
@@ -72,7 +75,7 @@ module en_send_stage #(
                 state = IDLE;
                 enable_ack = 1'b0;
                 body_ack = 1'b0;
-                external_req = 1'b0;
+                external_raw_req = 1'b0;
             end
         endcase
     end

@@ -209,7 +209,7 @@ def test_every_m6_enable_channel_binds_a_real_one_bit_four_phase_channel_and_bod
             assert channel not in architecture.output_ports
 
 
-def test_conditional_receive_binds_only_the_en_receive_microstage_to_external_and_body_paths() -> None:
+def test_conditional_receive_binds_its_explicit_m6_storage_and_delay_resources() -> None:
     program = _Program()
     select = program.name("select")
     architecture, bound = _bind(program, Sequence((
@@ -221,17 +221,30 @@ def test_conditional_receive_binds_only_the_en_receive_microstage_to_external_an
     channel_binding = _enable_channel_binding(bound, stage.enable_channel)
     instance = _bound_for(bound, stage)
     bindings = {item.formal_name: item for item in _bindings_for(bound, instance)}
-    assert instance.template == "en_receive_stage"
+    storage_resource = architecture.en_receive_storage[0]
+    delay_resource = architecture.en_receive_matched_delays[0]
+    storage = _bound_for(bound, storage_resource)
+    delay = _bound_for(bound, delay_resource)
+    storage_bindings = {item.formal_name: item for item in _bindings_for(bound, storage)}
+    delay_bindings = {item.formal_name: item for item in _bindings_for(bound, delay)}
+    assert instance.template == "en_receive_controller"
     assert {"enable_req", "enable_ack", "enable_data", "external_req", "external_ack", "external_data",
-            "body_req", "body_ack", "body_data"} == set(bindings)
+            "body_raw_req", "body_ack", "storage_data", "storage_enable"} == set(bindings)
     assert bindings["enable_req"].actual_signal_id == channel_binding.request_signal_id
     assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
     assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
     assert not any(item.source is stage.input_port for item in bound.instances)
-    assert _actual_signal(bound, bindings["body_req"]).kind == "request"
+    assert storage.template == "bundled_data_latch_bank" and storage.source is storage_resource
+    assert delay.template == "bundled_data_matched_delay" and delay.source is delay_resource
+    assert storage_bindings["data_in"].actual_signal_id == bindings["storage_data"].actual_signal_id
+    assert storage_bindings["storage_enable"].actual_signal_id == bindings["storage_enable"].actual_signal_id
+    assert delay_bindings["control_in"].actual_signal_id == bindings["body_raw_req"].actual_signal_id
+    assert delay_bindings["control_out"].actual_signal_id != bindings["body_raw_req"].actual_signal_id
+    assert delay_bindings["control_out"].actual_signal_id == "input_0_body_req"
+    assert bindings["body_ack"].actual_signal_id == "input_0_body_ack"
 
 
-def test_conditional_send_binds_only_the_en_send_microstage_to_external_and_body_paths() -> None:
+def test_conditional_send_binds_its_explicit_m6_storage_and_delay_resources() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -242,13 +255,37 @@ def test_conditional_send_binds_only_the_en_send_microstage_to_external_and_body
     channel_binding = _enable_channel_binding(bound, stage.enable_channel)
     instance = _bound_for(bound, stage)
     bindings = {item.formal_name: item for item in _bindings_for(bound, instance)}
-    assert instance.template == "en_send_stage"
+    storage_resource = architecture.en_send_storage[0]
+    delay_resource = architecture.en_send_matched_delays[0]
+    storage = _bound_for(bound, storage_resource)
+    delay = _bound_for(bound, delay_resource)
+    storage_bindings = {item.formal_name: item for item in _bindings_for(bound, storage)}
+    delay_bindings = {item.formal_name: item for item in _bindings_for(bound, delay)}
+    assert instance.template == "en_send_controller"
     assert {"enable_req", "enable_ack", "enable_data", "body_req", "body_ack", "body_data",
-            "external_req", "external_ack", "external_data"} == set(bindings)
+            "external_raw_req", "external_ack", "storage_data", "storage_enable"} == set(bindings)
     assert bindings["enable_req"].actual_signal_id == channel_binding.request_signal_id
     assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
     assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
     assert not any(item.source is stage.output_port for item in bound.instances)
+    assert storage.template == "bundled_data_latch_bank" and storage.source is storage_resource
+    assert delay.template == "bundled_data_matched_delay" and delay.source is delay_resource
+    assert storage_bindings["data_in"].actual_signal_id == bindings["storage_data"].actual_signal_id
+    assert storage_bindings["storage_enable"].actual_signal_id == bindings["storage_enable"].actual_signal_id
+    assert delay_bindings["control_in"].actual_signal_id == bindings["external_raw_req"].actual_signal_id
+    assert delay_bindings["control_out"].actual_signal_id != bindings["external_raw_req"].actual_signal_id
+    external_request = next(port.signal_id for port in bound.module_ports
+                            if port.endpoint is stage.body_send.source.operation.channel and
+                            port.flow == "send_request")
+    external_acknowledge = next(port.signal_id for port in bound.module_ports
+                                if port.endpoint is stage.body_send.source.operation.channel and
+                                port.flow == "send_acknowledge")
+    assert delay_bindings["control_out"].actual_signal_id == external_request
+    assert bindings["external_ack"].actual_signal_id == external_acknowledge
+    ordinary_storage = _bound_for(bound, architecture.storage.slots[0])
+    ordinary_delay = _bound_for(bound, architecture.matched_delays[0])
+    assert ordinary_storage.template == "bundled_data_latch_bank"
+    assert ordinary_delay.template == "bundled_data_matched_delay"
 
 
 def test_selected_endpoints_and_payload_widths_are_bound_without_reinterpretation() -> None:
@@ -328,18 +365,19 @@ def test_conditional_en_receive_uses_the_m6_microstage_and_enable_channel_bindin
     bindings = {binding.formal_name: binding for binding in _bindings_for(bound, instance)}
     assert set(bindings) == {
         "enable_req", "enable_ack", "enable_data",
-        "external_req", "external_ack", "external_data", "body_req", "body_ack", "body_data",
+        "external_req", "external_ack", "external_data", "body_raw_req", "body_ack",
+        "storage_data", "storage_enable",
     }
-    assert instance.template == "en_receive_stage"
+    assert instance.template == "en_receive_controller"
     assert bindings["enable_req"].actual_signal_id == channel.request_signal_id
     assert bindings["enable_ack"].actual_signal_id == channel.acknowledge_signal_id
     assert bindings["enable_data"].actual_signal_id == channel.data_signal_id
     assert _actual_signal(bound, bindings["external_req"]).kind == "request"
     assert _actual_signal(bound, bindings["external_ack"]).kind == "acknowledge"
     assert _actual_signal(bound, bindings["external_data"]).kind == "payload"
-    assert _actual_signal(bound, bindings["body_req"]).kind == "request"
+    assert _actual_signal(bound, bindings["body_raw_req"]).kind == "request"
     assert _actual_signal(bound, bindings["body_ack"]).kind == "acknowledge"
-    assert _actual_signal(bound, bindings["body_data"]).kind == "payload"
+    assert _actual_signal(bound, bindings["storage_data"]).kind == "payload"
     assert _actual_signal(bound, bindings["enable_data"]).kind == "payload"
     assert not any(item.source is stage.input_port for item in bound.instances)
 

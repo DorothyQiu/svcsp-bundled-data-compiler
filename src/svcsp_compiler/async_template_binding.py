@@ -10,7 +10,11 @@ from .async_microarchitecture import (
     AckJoin,
     AsyncMicroarchitecture,
     EnableChannel,
+    EnReceiveMatchedDelayRequirement,
+    EnReceiveStorageSlot,
     EnReceiveStage,
+    EnSendMatchedDelayRequirement,
+    EnSendStorageSlot,
     EnSendStage,
     InputAckDirectConnection,
     InputAckFanout,
@@ -39,8 +43,13 @@ class BoundAsyncInstance:
     inputs: tuple[InputPort, ...] = ()
     outputs: tuple[OutputPort, ...] = ()
 
-    storage_slot: StorageSlot | None = None
-    output_port: OutputPort | None = None
+    storage_slot: (
+        StorageSlot
+        | EnReceiveStorageSlot
+        | EnSendStorageSlot
+        | None
+    ) = None
+    output_port: InputPort | OutputPort | None = None
 
     value: None = None
     component: str = ""
@@ -350,6 +359,30 @@ def bind_async_templates(
         for item in architecture.en_send_stages
     }
 
+    def en_receive_resources(stage: EnReceiveStage) -> tuple[
+            EnReceiveStorageSlot, EnReceiveMatchedDelayRequirement]:
+        storage = [item for item in architecture.en_receive_storage if item.stage is stage]
+        delays = [item for item in architecture.en_receive_matched_delays if item.stage is stage]
+        if len(storage) != 1 or len(delays) != 1:
+            raise AsyncTemplateBindingError("EN_RECV stage lacks exactly one M6 storage and delay resource")
+        if storage[0].input_port is not stage.input_port or delays[0].input_port is not stage.input_port:
+            raise AsyncTemplateBindingError("EN_RECV resource input-port identity mismatch")
+        if delays[0].storage_slot is not storage[0]:
+            raise AsyncTemplateBindingError("EN_RECV delay does not select its M6 storage resource")
+        return storage[0], delays[0]
+
+    def en_send_resources(stage: EnSendStage) -> tuple[
+            EnSendStorageSlot, EnSendMatchedDelayRequirement]:
+        storage = [item for item in architecture.en_send_storage if item.stage is stage]
+        delays = [item for item in architecture.en_send_matched_delays if item.stage is stage]
+        if len(storage) != 1 or len(delays) != 1:
+            raise AsyncTemplateBindingError("EN_SEND stage lacks exactly one M6 storage and delay resource")
+        if storage[0].output_port is not stage.output_port or delays[0].output_port is not stage.output_port:
+            raise AsyncTemplateBindingError("EN_SEND resource output-port identity mismatch")
+        if delays[0].storage_slot is not storage[0]:
+            raise AsyncTemplateBindingError("EN_SEND delay does not select its M6 storage resource")
+        return storage[0], delays[0]
+
     enable_senders = {
         channel: add_instance(
             f"enable_sender_{index}",
@@ -461,9 +494,26 @@ def bind_async_templates(
                 )
             )
         else:
+            resource, delay = en_receive_resources(stage)
+            raw_req = ensure(
+                f"input_{index}_body_raw_req",
+                "request",
+                behavioral.ONE_BIT,
+            )
+            storage_data_in = ensure(
+                f"{resource.id}_data_in",
+                "payload",
+                payload.width,
+                operation.channel,
+            )
+            storage_enable_signal = ensure(
+                f"{resource.id}_storage_enable",
+                "control",
+                behavioral.ONE_BIT,
+            )
             item = add_instance(
-                f"en_receive_stage_{index}",
-                "en_receive_stage",
+                f"en_receive_controller_{index}",
+                "en_receive_controller",
                 stage,
                 enable_channel=stage.enable_channel,
             )
@@ -475,12 +525,40 @@ def bind_async_templates(
                 ext_req,
                 ext_ack,
                 ext_data,
+                raw_req,
                 req,
                 ack,
-                data,
+                storage_data_in,
+                storage_enable_signal,
                 bind,
                 parameter,
             )
+
+            storage = add_instance(
+                resource.id,
+                "bundled_data_latch_bank",
+                resource,
+                storage_slot=resource,
+                output_port=resource.input_port,
+            )
+            parameter(storage, "WIDTH", payload.width)
+            for formal, actual in (
+                ("data_in", storage_data_in),
+                ("storage_enable", storage_enable_signal),
+                ("data_out", data),
+            ):
+                bind(storage, formal, actual)
+
+            delay_item = add_instance(
+                delay.id,
+                "bundled_data_matched_delay",
+                delay,
+                storage_slot=resource,
+                output_port=resource.input_port,
+                value=delay.value,
+            )
+            bind(delay_item, "control_in", raw_req)
+            bind(delay_item, "control_out", req)
 
     base_lreq = ensure(
         "base_Lreq",
@@ -738,9 +816,26 @@ def bind_async_templates(
                 )
             )
         else:
+            resource, delay = en_send_resources(stage)
+            external_raw_req = ensure(
+                f"output_{index}_external_raw_req",
+                "request",
+                behavioral.ONE_BIT,
+            )
+            storage_data_in = ensure(
+                f"{resource.id}_data_in",
+                "payload",
+                payload.width,
+                operation.channel,
+            )
+            storage_enable_signal = ensure(
+                f"{resource.id}_storage_enable",
+                "control",
+                behavioral.ONE_BIT,
+            )
             item = add_instance(
-                f"en_send_stage_{index}",
-                "en_send_stage",
+                f"en_send_controller_{index}",
+                "en_send_controller",
                 stage,
                 enable_channel=stage.enable_channel,
             )
@@ -749,15 +844,42 @@ def bind_async_templates(
                 item,
                 stage,
                 payload,
-                ext_req,
+                external_raw_req,
                 ext_ack,
-                ext_data,
                 output_requests[port],
                 output_acks[port],
                 storage_data[slot],
+                storage_data_in,
+                storage_enable_signal,
                 bind,
                 parameter,
             )
+
+            storage = add_instance(
+                resource.id,
+                "bundled_data_latch_bank",
+                resource,
+                storage_slot=resource,
+                output_port=resource.output_port,
+            )
+            parameter(storage, "WIDTH", payload.width)
+            for formal, actual in (
+                ("data_in", storage_data_in),
+                ("storage_enable", storage_enable_signal),
+                ("data_out", ext_data),
+            ):
+                bind(storage, formal, actual)
+
+            delay_item = add_instance(
+                delay.id,
+                "bundled_data_matched_delay",
+                delay,
+                storage_slot=resource,
+                output_port=resource.output_port,
+                value=delay.value,
+            )
+            bind(delay_item, "control_in", external_raw_req)
+            bind(delay_item, "control_out", ext_req)
 
     _bind_output_request(
         architecture.output_request,
@@ -1292,9 +1414,11 @@ def _bind_en_receive(
     ext_req,
     ext_ack,
     ext_data,
+    raw_req,
     req,
     ack,
-    data,
+    storage_data,
+    storage_enable,
     bind,
     parameter,
 ):
@@ -1318,9 +1442,10 @@ def _bind_en_receive(
         ("external_req", ext_req),
         ("external_ack", ext_ack),
         ("external_data", ext_data),
-        ("body_req", req),
+        ("body_raw_req", raw_req),
         ("body_ack", ack),
-        ("body_data", data),
+        ("storage_data", storage_data),
+        ("storage_enable", storage_enable),
     ):
         bind(
             item,
@@ -1341,10 +1466,11 @@ def _bind_en_send(
     payload,
     ext_req,
     ext_ack,
-    ext_data,
     req,
     ack,
     data,
+    storage_data,
+    storage_enable,
     bind,
     parameter,
 ):
@@ -1368,9 +1494,10 @@ def _bind_en_send(
         ("body_req", req),
         ("body_ack", ack),
         ("body_data", data),
-        ("external_req", ext_req),
+        ("external_raw_req", ext_req),
         ("external_ack", ext_ack),
-        ("external_data", ext_data),
+        ("storage_data", storage_data),
+        ("storage_enable", storage_enable),
     ):
         bind(
             item,

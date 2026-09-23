@@ -442,11 +442,11 @@ def test_conditional_communications_emit_exact_en_recv_and_en_send_bindings() ->
     )
 
     assert (
-        "en_receive_stage en_receive_stage_0"
+        "en_receive_controller en_receive_controller_0"
         in rtl
     )
     assert (
-        "en_send_stage en_send_stage_0"
+        "en_send_controller en_send_controller_0"
         in rtl
     )
     assert (

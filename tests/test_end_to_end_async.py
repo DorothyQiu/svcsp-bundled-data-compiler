@@ -69,7 +69,7 @@ A.Receive(x); B.Receive(y); join C.Send(x); end endmodule''', '.N(2)'),
     ('''module fanout(interface A, B, C); logic x; always begin
 A.Receive(x); B.Send(x); C.Send(x); end endmodule''', '.M(2)'),
     ('''module conditional(interface A, B); logic c, x; always begin
-A.Receive(x); if (c) B.Send(x); end endmodule''', 'en_send_stage'),
+A.Receive(x); if (c) B.Send(x); end endmodule''', 'en_send_controller'),
 ))
 def test_target_entrypoint_accepts_supported_transaction_topologies(
     tmp_path: Path, source_text: str, expected: str,

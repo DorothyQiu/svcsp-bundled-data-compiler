@@ -1,7 +1,7 @@
-// Conditional receive micropipeline stage.  It consumes the enable token
-// first, then always supplies one BODY token.  The disabled BODY value is the
-// verification-model dummy payload of zero.
-module en_receive_stage #(
+// Behavioral EN_RECV control.  Payload retention is supplied by the bound
+// structural latch bank; this controller exposes only its capture data/control
+// and the raw outgoing BODY request.
+module en_receive_controller #(
     parameter integer WIDTH = 1
 ) (
     input  wire             enable_req,
@@ -10,21 +10,27 @@ module en_receive_stage #(
     input  wire             external_req,
     output reg              external_ack,
     input  wire [WIDTH-1:0] external_data,
-    output reg              body_req,
+    output reg              body_raw_req,
     input  wire             body_ack,
-    output reg  [WIDTH-1:0] body_data
+    output wire [WIDTH-1:0] storage_data,
+    output wire             storage_enable
 );
     localparam IDLE = 0, WAIT_EXTERNAL = 1, WAIT_BODY = 2;
     integer state;
     reg enabled;
+
+    // The external sender holds data while its request is asserted.  The
+    // disabled path deliberately captures the documented dummy payload.
+    assign storage_data = enabled ? external_data : {WIDTH{1'b0}};
+    assign storage_enable = body_raw_req &&
+                            (!enabled || (external_req && external_ack));
 
     initial begin
         state = IDLE;
         enabled = 1'b0;
         enable_ack = 1'b0;
         external_ack = 1'b0;
-        body_req = 1'b0;
-        body_data = {WIDTH{1'b0}};
+        body_raw_req = 1'b0;
     end
 
     always @(*) begin
@@ -34,21 +40,15 @@ module en_receive_stage #(
                     enabled = enable_data;
                     enable_ack = 1'b1;
                     if (enable_data) begin
-                        // An external sender may already have raised its
-                        // request before this enable token is consumed.
-                        // Accept that request in the same transition rather
-                        // than waiting for a second edge that will not come.
                         if (external_req) begin
-                            body_data = external_data;
                             external_ack = 1'b1;
-                            body_req = 1'b1;
+                            body_raw_req = 1'b1;
                             state = WAIT_BODY;
                         end else begin
                             state = WAIT_EXTERNAL;
                         end
                     end else begin
-                        body_data = {WIDTH{1'b0}};
-                        body_req = 1'b1;
+                        body_raw_req = 1'b1;
                         state = WAIT_BODY;
                     end
                 end
@@ -57,9 +57,8 @@ module en_receive_stage #(
                 if (!enable_req)
                     enable_ack = 1'b0;
                 if (external_req) begin
-                    body_data = external_data;
                     external_ack = 1'b1;
-                    body_req = 1'b1;
+                    body_raw_req = 1'b1;
                     state = WAIT_BODY;
                 end
             end
@@ -68,9 +67,9 @@ module en_receive_stage #(
                     enable_ack = 1'b0;
                 if (enabled && external_ack && !external_req)
                     external_ack = 1'b0;
-                if (body_req && body_ack)
-                    body_req = 1'b0;
-                if (!enable_req && !enable_ack && !body_req && !body_ack &&
+                if (body_raw_req && body_ack)
+                    body_raw_req = 1'b0;
+                if (!enable_req && !enable_ack && !body_raw_req && !body_ack &&
                     (!enabled || (!external_req && !external_ack))) begin
                     state = IDLE;
                     enabled = 1'b0;
@@ -80,7 +79,7 @@ module en_receive_stage #(
                 state = IDLE;
                 enable_ack = 1'b0;
                 external_ack = 1'b0;
-                body_req = 1'b0;
+                body_raw_req = 1'b0;
             end
         endcase
     end
