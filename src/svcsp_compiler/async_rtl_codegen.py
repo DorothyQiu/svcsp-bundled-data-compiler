@@ -17,16 +17,24 @@ def emit_async_systemverilog(bound: BoundAsyncModule) -> str:
     _validate(bound)
 
     module_name = bound.architecture.validated.decomposed.transaction.behavioral.name
-    lines = [f"module {module_name} ("]
+    if bound.module_parameters:
+        lines = [f"module {module_name} #("]
+        for index, parameter in enumerate(bound.module_parameters):
+            comma = "," if index + 1 < len(bound.module_parameters) else ""
+            default = "" if parameter.source.default is None else f" = {parameter.source.default}"
+            lines.append(f"    parameter int {parameter.name}{default}{comma}")
+        lines.append(") (")
+    else:
+        lines = [f"module {module_name} ("]
     for index, port in enumerate(bound.module_ports):
         comma = "," if index + 1 < len(bound.module_ports) else ""
-        lines.append(f"    {port.direction} logic{_width(port.width)} {port.name}{comma}")
+        lines.append(f"    {port.direction} logic{_width(port.width, bound)} {port.name}{comma}")
     lines.append(");")
 
     external = {port.signal_id for port in bound.module_ports}
     for signal in bound.signals:
         if signal.id not in external:
-            lines.append(f"  logic{_width(signal.width)} {signal.id};")
+            lines.append(f"  logic{_width(signal.width, bound)} {signal.id};")
 
     if bound.assignments:
         lines.append("")
@@ -59,7 +67,7 @@ def emit_async_systemverilog(bound: BoundAsyncModule) -> str:
             lines.append(f"  {instance.component} #(")
             for index, parameter in enumerate(parameters):
                 comma = "," if index + 1 < len(parameters) else ""
-                lines.append(f"    .{parameter.formal_name}({_parameter_value(parameter.value)}){comma}")
+                lines.append(f"    .{parameter.formal_name}({_parameter_value(parameter.value, bound)}){comma}")
             lines.append(f"  ) {instance.id} (")
         else:
             lines.append(f"  {instance.component} {instance.id} (")
@@ -104,6 +112,13 @@ def _validate(bound: BoundAsyncModule) -> None:
     if any(source not in signal_ids for item in bound.assignments for source in item.source_signal_ids):
         raise AsyncRTLCodegenError("assignment references an undeclared source signal")
     behavioral_module = bound.architecture.validated.decomposed.transaction.behavioral
+    _validate_module_parameters(bound, behavioral_module)
+    for port in bound.module_ports:
+        _validate_payload_width_ownership(port.width, bound)
+    for signal in bound.signals:
+        _validate_payload_width_ownership(signal.width, bound)
+    for parameter in bound.parameter_bindings:
+        _validate_payload_width_ownership(parameter.value, bound)
     module_variables = behavioral_module.variables + behavioral_module.external_inputs
     for variable in module_variables:
         matches = [item for item in bound.variable_bindings if item.variable is variable]
@@ -119,7 +134,55 @@ def _validate(bound: BoundAsyncModule) -> None:
             raise AsyncRTLCodegenError(f"variable {binding.variable.name} has the wrong bound width")
 
 
-def _width(width: behavioral.PayloadWidth) -> str:
+def _validate_module_parameters(
+    bound: BoundAsyncModule,
+    behavioral_module: behavioral.BehavioralModule,
+) -> None:
+    names = [parameter.name for parameter in bound.module_parameters]
+    if len(names) != len(set(names)):
+        raise AsyncRTLCodegenError("duplicate bound module parameter")
+    if any(parameter.name != parameter.source.name for parameter in bound.module_parameters):
+        raise AsyncRTLCodegenError("bound module parameter name differs from its source")
+    for source in behavioral_module.parameters:
+        if len([parameter for parameter in bound.module_parameters if parameter.source is source]) != 1:
+            raise AsyncRTLCodegenError(
+                f"parameter {source.name} lacks one exact source-module binding"
+            )
+    for parameter in bound.module_parameters:
+        if not any(parameter.source is source for source in behavioral_module.parameters):
+            raise AsyncRTLCodegenError(
+                f"bound module parameter {parameter.name} is not a source module parameter"
+            )
+    if set(names) & {port.name for port in bound.module_ports}:
+        raise AsyncRTLCodegenError("module parameter conflicts with a public module port")
+    if set(names) & {signal.id for signal in bound.signals}:
+        raise AsyncRTLCodegenError("module parameter conflicts with a generated signal")
+
+
+def _module_parameter(
+    parameter: behavioral.Parameter,
+    bound: BoundAsyncModule,
+):
+    matches = [item for item in bound.module_parameters if item.source is parameter]
+    if len(matches) != 1:
+        raise AsyncRTLCodegenError(
+            f"parameter {parameter.name} lacks one exact source-module binding"
+        )
+    return matches[0]
+
+
+def _validate_payload_width_ownership(
+    width: behavioral.PayloadWidth,
+    bound: BoundAsyncModule,
+) -> None:
+    for parameter in width.parameters:
+        _module_parameter(parameter, bound)
+    if width.symbolic is not None and not width.parameters:
+        raise AsyncRTLCodegenError("symbolic payload width lacks a source module parameter")
+
+
+def _width(width: behavioral.PayloadWidth, bound: BoundAsyncModule) -> str:
+    _validate_payload_width_ownership(width, bound)
     if width.bits is not None:
         return "" if width.bits == 1 else f" [{width.bits - 1}:0]"
     if width.symbolic is None:
@@ -127,7 +190,8 @@ def _width(width: behavioral.PayloadWidth) -> str:
     return f" [{width.symbolic}-1:0]"
 
 
-def _parameter_value(value: behavioral.PayloadWidth) -> str:
+def _parameter_value(value: behavioral.PayloadWidth, bound: BoundAsyncModule) -> str:
+    _validate_payload_width_ownership(value, bound)
     if value.bits is not None:
         return str(value.bits)
     if value.symbolic is None:
@@ -167,7 +231,7 @@ def _expression(expression: behavioral.Expression, bound: BoundAsyncModule) -> s
         if expression.value is not None:
             return expression.value
     if expression.form == "parameter" and expression.parameter is not None:
-        return expression.parameter.name
+        return _module_parameter(expression.parameter, bound).name
     if expression.form == "literal" and expression.value is not None:
         return expression.value
     if expression.form == "unary" and expression.operator is not None and len(expression.operands) == 1:

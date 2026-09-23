@@ -1,4 +1,8 @@
 """Payload-width coverage for the authoritative M1--M7 flow."""
+from pathlib import Path
+import shutil
+import subprocess
+
 import pytest
 
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
@@ -9,6 +13,11 @@ from svcsp_compiler.communication_decomposition import decompose_transaction
 from svcsp_compiler.frontend import parse_text
 from svcsp_compiler.semantic_analysis import analyze_semantics
 from svcsp_compiler.transaction import extract_transaction
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RTL_LIBRARY = tuple(sorted((ROOT / 'rtl_lib').glob('**/*.sv')))
+IVERILOG = shutil.which('iverilog')
 
 
 def _lower(source: str):
@@ -134,6 +143,41 @@ logic [W-1:0] x; always begin A.Receive(x); B.Send(x); end endmodule''')
 logic [V-1:0] x; always C.Send(x); endmodule''')
     with pytest.raises(Exception, match='undeclared symbolic width parameter: W'):
         parse_text('module m; logic [W-1:0] x; always begin end endmodule')
+
+
+def test_symbolic_width_rtl_declares_its_source_parameter_before_use_and_compiles(tmp_path: Path) -> None:
+    _, _, _, _, _, bound = _target('''
+module symbolic_width #(parameter int W = 8) (Channel #(W) A, B);
+logic [W-1:0] x;
+always begin A.Receive(x); B.Send(x); end
+endmodule''')
+    rtl = emit_async_systemverilog(bound)
+    generated = tmp_path / 'symbolic_width.sv'
+    generated.write_text(rtl)
+
+    assert rtl.index('parameter int W = 8') < rtl.index('input logic reset_n')
+    assert 'logic [W-1:0] body_var_0_x;' in rtl
+    assert '.WIDTH(W)' in rtl
+
+    if not IVERILOG:
+        pytest.skip('Icarus Verilog is not available')
+    result = subprocess.run(
+        [
+            IVERILOG,
+            '-g2012',
+            '-s',
+            'symbolic_width',
+            '-o',
+            str(tmp_path / 'symbolic_width'),
+            *(str(source) for source in RTL_LIBRARY),
+            str(generated),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_payload_width_object_requires_exactly_one_representation() -> None:

@@ -64,6 +64,42 @@ def test_target_fixture_compiles_through_the_complete_async_flow(tmp_path: Path)
     assert compile_result.returncode == 0, compile_result.stderr
 
 
+def test_target_entrypoint_emits_compile_valid_source_module_parameters(tmp_path: Path) -> None:
+    source = tmp_path / 'parameterized.sv'
+    source.write_text('''
+module parameterized #(parameter int W = 8) (Channel #(W) A, B);
+logic [W-1:0] x;
+always begin A.Receive(x); B.Send(x); end
+endmodule
+''')
+    rtl = compile_async_file(source)
+    generated = tmp_path / 'parameterized_generated.sv'
+    generated.write_text(rtl)
+
+    assert rtl.startswith('module parameterized #(\n    parameter int W = 8\n) (\n')
+    assert '.WIDTH(W)' in rtl
+
+    if not IVERILOG:
+        pytest.skip('Icarus Verilog is not available')
+    result = subprocess.run(
+        [
+            IVERILOG,
+            '-g2012',
+            '-s',
+            'parameterized',
+            '-o',
+            str(tmp_path / 'parameterized'),
+            *(str(library) for library in RTL_LIBRARY),
+            str(generated),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(('source_text', 'expected'), (
     ('''module parallel(interface A, B, C); logic x, y; always begin fork
 A.Receive(x); B.Receive(y); join C.Send(x); end endmodule''', '.N(2)'),

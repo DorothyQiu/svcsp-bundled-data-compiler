@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
+
+import pytest
 
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
-from svcsp_compiler.async_rtl_codegen import emit_async_systemverilog
+from svcsp_compiler.async_rtl_codegen import AsyncRTLCodegenError, emit_async_systemverilog
 from svcsp_compiler.async_template_binding import bind_async_templates
 from svcsp_compiler.behavioral_ir import (
     Assign,
@@ -23,8 +26,10 @@ from svcsp_compiler.behavioral_ir import (
     Skip,
     SourceLocation,
     Variable,
+    lower_behavioral,
 )
 from svcsp_compiler.communication_decomposition import decompose_transaction
+from svcsp_compiler.frontend import parse_text
 from svcsp_compiler.semantic_analysis import analyze_semantics
 from svcsp_compiler.transaction import extract_transaction
 
@@ -98,10 +103,14 @@ class _Program:
 
 
 def _bound(program: _Program, body):
+    return _bound_module(program.module(body))
+
+
+def _bound_module(module: BehavioralModule):
     architecture = lower_microarchitecture(
         analyze_semantics(
             decompose_transaction(
-                extract_transaction(program.module(body)),
+                extract_transaction(module),
             )
         )
     )
@@ -1147,3 +1156,60 @@ def test_conditional_enable_channel_acknowledgement_is_emitted_once_exactly_as_b
             f".ack({channel.acknowledge_signal_id})"
             in rtl
         )
+
+
+def test_source_module_parameters_emit_in_source_order_before_ports_and_instances() -> None:
+    behavioral = lower_behavioral(parse_text('''
+module parameterized #(parameter int W = 8, parameter int V) (Channel #(W) A, B);
+logic [W-1:0] x;
+always begin A.Receive(x); B.Send(x); end
+endmodule
+''', "parameterized.sv"))
+
+    bound = _bound_module(behavioral)
+    rtl = emit_async_systemverilog(bound)
+
+    assert rtl.startswith("""module parameterized #(
+    parameter int W = 8,
+    parameter int V
+) (
+""")
+    assert rtl.index("parameter int W = 8") < rtl.index("input logic reset_n")
+    assert "logic [W-1:0] body_var_0_x;" in rtl
+    assert ".WIDTH(W)" in rtl
+    assert tuple(item.source for item in bound.module_parameters) == behavioral.parameters
+    assert bound.module_parameters[0].source is behavioral.parameters[0]
+    assert bound.module_parameters[1].source is behavioral.parameters[1]
+
+
+def test_module_without_source_parameters_keeps_nonparameterized_header() -> None:
+    program = _Program()
+    rtl = emit_async_systemverilog(_bound(program, Sequence((
+        program.receive("A", "a"),
+        program.send("B", program.name("a")),
+    ))))
+
+    assert rtl.startswith("module async_codegen (\n")
+    assert "module async_codegen #(\n" not in rtl
+
+
+def test_parameter_expression_uses_exact_bound_module_parameter_identity() -> None:
+    behavioral = lower_behavioral(parse_text('''
+module parameter_guard #(parameter int P = 1) (Channel A, B);
+logic x;
+always begin A.Receive(x); if (P) B.Send(x); end
+endmodule
+''', "parameter_guard.sv"))
+    bound = _bound_module(behavioral)
+    rtl = emit_async_systemverilog(bound)
+
+    assert "parameter int P = 1" in rtl
+    assert re.search(r"assign enable_channel_0_value = P;", rtl)
+
+    foreign = Parameter("P", "parameter_guard", behavioral.parameters[0].location, "1")
+    malformed = replace(
+        bound,
+        module_parameters=(replace(bound.module_parameters[0], source=foreign),),
+    )
+    with pytest.raises(AsyncRTLCodegenError, match="exact source-module binding"):
+        emit_async_systemverilog(malformed)
