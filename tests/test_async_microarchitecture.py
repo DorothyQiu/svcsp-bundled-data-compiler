@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from svcsp_compiler.async_microarchitecture import (
+    AckJoin,
     AsyncMicroarchitecture,
     BufferStyle,
     CombinationalBlock,
@@ -10,11 +11,16 @@ from svcsp_compiler.async_microarchitecture import (
     EnReceiveStage,
     EnSendStage,
     HandshakeProtocol,
-    InputJoin,
+    InputAckDirectConnection,
+    InputAckFanout,
+    InputRequestDirectConnection,
     InputPort,
     MatchedDelayRequirement,
-    OutputFork,
+    OutputAckDirectConnection,
+    OutputRequestDirectConnection,
     OutputPort,
+    RequestFanout,
+    RequestJoin,
     StageStorage,
     StorageSlot,
     TimingModel,
@@ -77,6 +83,100 @@ def _lower(program: _Program, body) -> AsyncMicroarchitecture:
     return lower_microarchitecture(_validated(program, body))
 
 
+def _assert_ordinary_body_topology(architecture: AsyncMicroarchitecture, *, inputs: int,
+                                   outputs: int, has_request_join: bool,
+                                   has_request_fanout: bool,
+                                   has_ack_join: bool) -> None:
+    """Check the M6 structural topology required for an ordinary BODY stage."""
+
+    assert len(architecture.input_ports) == inputs
+    assert len(architecture.output_ports) == outputs
+    assert len(architecture.matched_delays) == outputs
+    assert len(architecture.storage.slots) == outputs
+    for slot, output in zip(architecture.storage.slots, architecture.output_ports):
+        requirement = next(delay for delay in architecture.matched_delays
+                           if delay.output_port is output)
+        assert requirement.storage_slot is slot
+        assert requirement.controller is architecture.base_controller
+
+    controller = architecture.base_controller
+    if has_request_join:
+        assert isinstance(architecture.input_request, RequestJoin)
+        assert architecture.input_request.controller is controller
+        assert isinstance(architecture.input_ack, InputAckFanout)
+    else:
+        assert isinstance(architecture.input_request, InputRequestDirectConnection)
+        assert architecture.input_request.controller is controller
+        assert isinstance(architecture.input_ack, InputAckDirectConnection)
+    if has_request_fanout:
+        assert isinstance(architecture.output_request, RequestFanout)
+        assert architecture.output_request.controller is controller
+    else:
+        assert isinstance(architecture.output_request, OutputRequestDirectConnection)
+        assert architecture.output_request.controller is controller
+    if has_ack_join:
+        assert isinstance(architecture.output_ack, AckJoin)
+        assert architecture.output_ack.controller is controller
+    else:
+        assert isinstance(architecture.output_ack, OutputAckDirectConnection)
+
+
+def test_ordinary_body_1r1s_bypasses_request_and_ack_joins_with_one_base_controller() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        program.send("B", program.name("a")),
+    )))
+
+    _assert_ordinary_body_topology(
+        architecture, inputs=1, outputs=1, has_request_join=False,
+        has_request_fanout=False, has_ack_join=False,
+    )
+
+
+def test_ordinary_body_2r1s_has_request_join_one_base_controller_and_ack_join_bypass() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        program.send("C", program.name("a")),
+    )))
+
+    _assert_ordinary_body_topology(
+        architecture, inputs=2, outputs=1, has_request_join=True,
+        has_request_fanout=False, has_ack_join=False,
+    )
+
+
+def test_ordinary_body_1r2s_has_one_base_controller_request_fanout_and_ack_join() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        program.send("B", program.name("a")),
+        program.send("C", program.name("a")),
+    )))
+
+    _assert_ordinary_body_topology(
+        architecture, inputs=1, outputs=2, has_request_join=False,
+        has_request_fanout=True, has_ack_join=True,
+    )
+
+
+def test_ordinary_body_2r2s_has_request_join_one_base_controller_request_fanout_and_ack_join() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        program.send("C", program.name("a")),
+        program.send("D", program.name("b")),
+    )))
+
+    _assert_ordinary_body_topology(
+        architecture, inputs=2, outputs=2, has_request_join=True,
+        has_request_fanout=True, has_ack_join=True,
+    )
+
+
 def test_1r1s_is_one_bundled_data_four_phase_async_stage() -> None:
     program = _Program()
     validated = _validated(program, Sequence((program.receive("A", "a"), program.send("B", program.name("a")))))
@@ -86,14 +186,14 @@ def test_1r1s_is_one_bundled_data_four_phase_async_stage() -> None:
     assert architecture.validated is validated
     assert architecture.protocol is HandshakeProtocol.FOUR_PHASE
     assert architecture.timing_model is TimingModel.BUNDLED_DATA
-    assert isinstance(architecture.input_join, InputJoin)
-    assert isinstance(architecture.output_fork, OutputFork)
+    assert isinstance(architecture.input_request, InputRequestDirectConnection)
+    assert isinstance(architecture.output_request, OutputRequestDirectConnection)
     assert isinstance(architecture.storage, StageStorage)
-    assert len(architecture.input_join.inputs) == 1
-    assert len(architecture.output_fork.outputs) == 1
+    assert len(architecture.input_ports) == 1
+    assert len(architecture.output_ports) == 1
 
 
-def test_2r1s_input_join_waits_for_both_arrivals_without_serializing_them() -> None:
+def test_2r1s_request_join_has_both_independent_input_ports() -> None:
     program = _Program()
     architecture = _lower(program, Sequence((
         program.receive("A", "a"),
@@ -101,17 +201,13 @@ def test_2r1s_input_join_waits_for_both_arrivals_without_serializing_them() -> N
         program.send("C", Expression("literal", value="1'b0")),
     )))
 
-    join = architecture.input_join
+    join = architecture.input_request
+    assert isinstance(join, RequestJoin)
     first, second = join.inputs
     assert isinstance(first, InputPort) and isinstance(second, InputPort)
-    assert join.serializes_inputs is False
-    assert join.is_ready((first,)) is False
-    assert join.is_ready((second,)) is False
-    assert join.is_ready((first, second)) is True
-    assert join.is_ready((second, first)) is True
 
 
-def test_1r2s_output_fork_launches_branches_independently_and_completes_after_all() -> None:
+def test_1r2s_request_fanout_has_both_independent_output_ports() -> None:
     program = _Program()
     architecture = _lower(program, Sequence((
         program.receive("A", "a"),
@@ -119,15 +215,10 @@ def test_1r2s_output_fork_launches_branches_independently_and_completes_after_al
         program.send("C", program.name("a")),
     )))
 
-    fork = architecture.output_fork
+    fork = architecture.output_request
+    assert isinstance(fork, RequestFanout)
     first, second = fork.outputs
     assert isinstance(first, OutputPort) and isinstance(second, OutputPort)
-    assert fork.serializes_outputs is False
-    assert fork.can_launch(first, ()) is True
-    assert fork.can_launch(second, ()) is True
-    assert fork.can_launch(second, (first,)) is True
-    assert fork.is_complete((first,)) is False
-    assert fork.is_complete((first, second)) is True
 
 
 def test_2r2s_has_one_two_input_join_and_two_independent_output_branches() -> None:
@@ -139,10 +230,10 @@ def test_2r2s_has_one_two_input_join_and_two_independent_output_branches() -> No
         program.send("D", program.name("b")),
     )))
 
-    assert len(architecture.input_join.inputs) == 2
-    assert len(architecture.output_fork.outputs) == 2
-    assert architecture.input_join.serializes_inputs is False
-    assert architecture.output_fork.serializes_outputs is False
+    assert isinstance(architecture.input_request, RequestJoin)
+    assert isinstance(architecture.output_request, RequestFanout)
+    assert len(architecture.input_request.inputs) == 2
+    assert len(architecture.output_request.outputs) == 2
 
 
 def test_storage_has_one_slot_per_body_send_and_retains_each_payload_until_its_output_completes() -> None:
@@ -155,7 +246,7 @@ def test_storage_has_one_slot_per_body_send_and_retains_each_payload_until_its_o
     architecture = lower_microarchitecture(validated)
 
     assert len(architecture.storage.slots) == len(validated.decomposed.body_sends) == 2
-    for slot, output, body_send in zip(architecture.storage.slots, architecture.output_fork.outputs,
+    for slot, output, body_send in zip(architecture.storage.slots, architecture.output_ports,
                                        validated.decomposed.body_sends):
         assert isinstance(slot, StorageSlot)
         assert slot.body_send is body_send
@@ -173,8 +264,8 @@ def test_en_recv_and_en_send_are_placed_on_their_exact_body_ports() -> None:
     )))
     architecture = lower_microarchitecture(validated)
 
-    input_port = architecture.input_join.inputs[0]
-    output_port = architecture.output_fork.outputs[0]
+    input_port = architecture.input_ports[0]
+    output_port = architecture.output_ports[0]
     assert input_port.body_receive is validated.decomposed.body_receives[0]
     assert input_port.en_receive is validated.decomposed.en_receives[0]
     assert input_port.en_receive.body_receive is input_port.body_receive
@@ -213,12 +304,12 @@ def test_each_output_has_a_matched_delay_tied_to_join_storage_and_its_own_launch
     )))
 
     assert len(architecture.matched_delays) == 2
-    for slot, output in zip(architecture.storage.slots, architecture.output_fork.outputs):
+    for slot, output in zip(architecture.storage.slots, architecture.output_ports):
         requirement = next(
             delay for delay in architecture.matched_delays if delay.output_port is output
         )
         assert requirement.storage_slot is slot
-        assert requirement.input_join is architecture.input_join
+        assert requirement.controller is architecture.base_controller
         assert requirement.value is None
 
 
@@ -228,8 +319,8 @@ def test_lowering_preserves_exact_m5_m4_identities_without_pipeline_structure() 
     architecture = lower_microarchitecture(validated)
 
     assert architecture.validated is validated
-    assert architecture.input_join.inputs[0].body_receive is validated.decomposed.body_receives[0]
-    assert architecture.output_fork.outputs[0].body_send is validated.decomposed.body_sends[0]
+    assert architecture.input_ports[0].body_receive is validated.decomposed.body_receives[0]
+    assert architecture.output_ports[0].body_send is validated.decomposed.body_sends[0]
     assert architecture.combinational.operations is validated.decomposed.body_combinational
     assert not hasattr(architecture, "pipeline")
     assert not hasattr(architecture, "stage_order")
@@ -264,7 +355,7 @@ def test_conditional_receive_has_a_pre_input_enable_channel_and_en_receive_stage
     assert isinstance(stage, EnReceiveStage)
     assert stage.enable_channel is channel
     assert stage.body_receive is body_receive
-    assert stage.input_port is architecture.input_join.inputs[0]
+    assert stage.input_port is architecture.input_ports[0]
     assert stage.disabled_payload is body_receive.disabled_payload
 
 
@@ -289,7 +380,7 @@ def test_conditional_send_has_a_post_input_enable_channel_and_en_send_stage() ->
     assert isinstance(stage, EnSendStage)
     assert stage.enable_channel is channel
     assert stage.body_send is body_send
-    assert stage.output_port is architecture.output_fork.outputs[0]
+    assert stage.output_port is architecture.output_ports[0]
 
 
 def test_en_send_consumes_the_unconditional_body_output_without_dummy_payload_semantics() -> None:
@@ -338,11 +429,11 @@ def test_body_stage_has_one_matched_delay_per_output_including_trivial_payloads(
         program.send("C", Expression("literal", value="1'b0")),
     )))
 
-    assert len(architecture.matched_delays) == len(architecture.output_fork.outputs) == 2
-    for slot, output in zip(architecture.storage.slots, architecture.output_fork.outputs):
+    assert len(architecture.matched_delays) == len(architecture.output_ports) == 2
+    for slot, output in zip(architecture.storage.slots, architecture.output_ports):
         requirement = next(item for item in architecture.matched_delays if item.output_port is output)
         assert requirement.storage_slot is slot
-        assert requirement.input_join is architecture.input_join
+        assert requirement.controller is architecture.base_controller
         assert requirement.output_port is output
 
 
@@ -428,7 +519,7 @@ def test_pre_input_enable_producer_precedes_join_and_is_a_body_control_output() 
     assert channel.producer.available_before_controlled_body_input is True
     assert channel.producer.transaction is architecture.validated
     assert channel.producer.is_body_control_output is True
-    assert channel not in architecture.output_fork.outputs
+    assert channel not in architecture.output_ports
 
 
 def test_post_input_enable_producer_is_unconditional_body_control_output_in_completion() -> None:

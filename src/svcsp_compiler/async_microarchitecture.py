@@ -34,14 +34,34 @@ class InputPort:
 
 
 @dataclass(frozen=True)
-class InputJoin:
+class BaseHalfBufferController:
+    """The one structural 1x1 controller required by every ordinary BODY."""
+
+    id: str
+
+
+@dataclass(frozen=True)
+class RequestJoin:
+    controller: BaseHalfBufferController
     inputs: tuple[InputPort, ...]
-    serializes_inputs: bool = False
 
-    def is_ready(self, arrived: tuple[InputPort, ...]) -> bool:
-        """All inputs are required, but their arrival order has no meaning."""
 
-        return len(arrived) == len(self.inputs) and set(arrived) == set(self.inputs)
+@dataclass(frozen=True)
+class InputRequestDirectConnection:
+    controller: BaseHalfBufferController
+    input: InputPort
+
+
+@dataclass(frozen=True)
+class InputAckFanout:
+    controller: BaseHalfBufferController
+    inputs: tuple[InputPort, ...]
+
+
+@dataclass(frozen=True)
+class InputAckDirectConnection:
+    controller: BaseHalfBufferController
+    input: InputPort
 
 
 @dataclass(frozen=True)
@@ -115,19 +135,29 @@ class EnSendStage:
 
 
 @dataclass(frozen=True)
-class OutputFork:
+class RequestFanout:
+    controller: BaseHalfBufferController
     outputs: tuple[OutputPort, ...]
-    serializes_outputs: bool = False
 
-    def can_launch(self, output: OutputPort, completed: tuple[OutputPort, ...]) -> bool:
-        """An uncompleted output branch can launch without waiting for siblings."""
 
-        return output in self.outputs and output not in completed and set(completed) <= set(self.outputs)
 
-    def is_complete(self, completed: tuple[OutputPort, ...]) -> bool:
-        """Stage storage can be released only after every output branch completes."""
+@dataclass(frozen=True)
+class OutputRequestDirectConnection:
+    controller: BaseHalfBufferController
+    output: OutputPort
 
-        return set(completed) == set(self.outputs)
+
+
+@dataclass(frozen=True)
+class AckJoin:
+    controller: BaseHalfBufferController
+    outputs: tuple[OutputPort, ...]
+
+
+@dataclass(frozen=True)
+class OutputAckDirectConnection:
+    controller: BaseHalfBufferController
+    output: OutputPort
 
 
 @dataclass(frozen=True)
@@ -146,7 +176,7 @@ class MatchedDelayRequirement:
     id: str
     operations: tuple[RegionOperation, ...]
     storage_slot: StorageSlot
-    input_join: InputJoin
+    controller: BaseHalfBufferController
     output_port: OutputPort
     value: None = None
 
@@ -158,10 +188,15 @@ class AsyncMicroarchitecture:
     validated: SemanticallyValidatedTransaction
     protocol: HandshakeProtocol
     timing_model: TimingModel
-    input_join: InputJoin
+    input_ports: tuple[InputPort, ...]
+    base_controller: BaseHalfBufferController
+    input_request: RequestJoin | InputRequestDirectConnection
+    input_ack: InputAckFanout | InputAckDirectConnection
     combinational: CombinationalBlock
     storage: StageStorage
-    output_fork: OutputFork
+    output_ports: tuple[OutputPort, ...]
+    output_request: RequestFanout | OutputRequestDirectConnection
+    output_ack: AckJoin | OutputAckDirectConnection
     matched_delays: tuple[MatchedDelayRequirement, ...]
     buffer_style: BufferStyle
     enable_channels: tuple[EnableChannel, ...]
@@ -180,16 +215,31 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
     en_sends = {adapter.body_send: adapter for adapter in decomposed.en_sends}
     inputs = tuple(InputPort(body_receive, en_receives.get(body_receive))
                    for body_receive in decomposed.body_receives)
-    input_join = InputJoin(inputs)
     outputs = tuple(OutputPort(body_send, en_sends.get(body_send))
                     for body_send in decomposed.body_sends)
-    output_fork = OutputFork(outputs)
+    controller = BaseHalfBufferController('base_half_buffer_0')
+    input_request = (
+        RequestJoin(controller, inputs) if len(inputs) > 1 else
+        InputRequestDirectConnection(controller, inputs[0])
+    )
+    input_ack = (
+        InputAckFanout(controller, inputs) if len(inputs) > 1
+        else InputAckDirectConnection(controller, inputs[0])
+    )
+    output_request = (
+        RequestFanout(controller, outputs) if len(outputs) > 1 else
+        OutputRequestDirectConnection(controller, outputs[0])
+    )
+    output_ack = (
+        AckJoin(controller, outputs) if len(outputs) > 1 else
+        OutputAckDirectConnection(controller, outputs[0])
+    )
     storage = StageStorage(tuple(
         StorageSlot(body_send, output)
         for body_send, output in zip(decomposed.body_sends, outputs)
     ))
     combinational = CombinationalBlock(decomposed.body_combinational)
-    matched_delays = _matched_delays(combinational.operations, storage, input_join)
+    matched_delays = _matched_delays(combinational.operations, storage, controller)
     enable_channels, en_receive_stages, en_send_stages = _enable_stages(
         validated, decomposed.en_receives, decomposed.en_sends, inputs, outputs,
     )
@@ -197,10 +247,15 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
         validated,
         HandshakeProtocol.FOUR_PHASE,
         TimingModel.BUNDLED_DATA,
-        input_join,
+        inputs,
+        controller,
+        input_request,
+        input_ack,
         combinational,
         storage,
-        output_fork,
+        outputs,
+        output_request,
+        output_ack,
         matched_delays,
         BufferStyle.HALF_BUFFER,
         enable_channels,
@@ -258,14 +313,14 @@ def _enable_stages(validated: SemanticallyValidatedTransaction,
 
 
 def _matched_delays(combinational: tuple[RegionOperation, ...], storage: StageStorage,
-                    input_join: InputJoin) -> tuple[MatchedDelayRequirement, ...]:
+                    controller: BaseHalfBufferController) -> tuple[MatchedDelayRequirement, ...]:
     operations = [operation for operation in combinational
                   if isinstance(operation.operation, behavioral.Assign) and _nontrivial(operation.operation.value)]
     operations.extend(slot.body_send.source for slot in storage.slots
                       if _nontrivial(slot.body_send.source.operation.value))
     return tuple(
         MatchedDelayRequirement(
-            f'matched_delay_{index}', tuple(operations), slot, input_join, slot.retained_until,
+            f'matched_delay_{index}', tuple(operations), slot, controller, slot.retained_until,
         )
         for index, slot in enumerate(storage.slots)
     )

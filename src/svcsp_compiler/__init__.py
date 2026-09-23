@@ -2,10 +2,13 @@
 
 from .async_compiler import compile_async_file
 from .async_microarchitecture import (
-    AsyncMicroarchitecture, BufferStyle, CombinationalBlock, EnableAvailability,
+    AckJoin, AsyncMicroarchitecture, BaseHalfBufferController, BufferStyle, CombinationalBlock, EnableAvailability,
     EnableChannel, EnableTokenProducer, EnReceiveStage, EnSendStage,
-    HandshakeProtocol, InputJoin, InputPort, MatchedDelayRequirement, OutputFork,
-    OutputPort, StageStorage, StorageSlot, TimingModel, lower_microarchitecture,
+    HandshakeProtocol, InputAckDirectConnection, InputAckFanout,
+    InputPort, InputRequestDirectConnection, MatchedDelayRequirement,
+    OutputAckDirectConnection, OutputPort, OutputRequestDirectConnection,
+    RequestFanout, RequestJoin, StageStorage, StorageSlot, TimingModel,
+    lower_microarchitecture,
 )
 from .async_rtl_codegen import AsyncRTLCodegenError, emit_async_systemverilog
 from .async_template_binding import (
@@ -36,18 +39,21 @@ from .transaction import (
 )
 
 __all__ = [
-    "Assign", "AsyncMicroarchitecture", "AsyncRTLCodegenError", "AsyncTemplateBindingError",
+    "AckJoin", "Assign", "AsyncMicroarchitecture", "AsyncRTLCodegenError", "AsyncTemplateBindingError",
     "BehavioralIRError", "BehavioralModule", "BodyReceive", "BodySend", "BoundAsyncAssignment",
     "BoundAsyncConnection", "BoundAsyncInstance", "BoundAsyncModule", "BoundAsyncModulePort",
     "BoundAsyncParameterBinding", "BoundAsyncPortBinding", "BoundAsyncSignal", "BoundAsyncVariableBinding",
-    "BoundEnableChannel", "BufferStyle", "ChannelEndpoint", "CombinationalBlock", "DecomposedSVCSPError",
+    "BaseHalfBufferController", "BoundEnableChannel", "BufferStyle", "ChannelEndpoint", "CombinationalBlock", "DecomposedSVCSPError",
     "DecomposedTransaction", "Enable", "EnableAvailability", "EnableChannel", "EnableTokenProducer",
     "EnReceive", "EnReceiveStage", "EnSend", "EnSendStage", "Expression", "FrontendError",
-    "HandshakeProtocol", "If", "InputJoin", "InputPort", "InvalidPayload", "MatchedDelayRequirement",
-    "ONE_BIT", "OutputFork", "OutputPort", "Parallel", "Parameter", "PayloadType", "PayloadWidth",
+    "HandshakeProtocol", "If", "InputAckDirectConnection", "InputAckFanout", "InputPort",
+    "InputRequestDirectConnection", "InvalidPayload", "MatchedDelayRequirement", "ONE_BIT",
+    "OutputAckDirectConnection", "OutputPort", "OutputRequestDirectConnection", "Parallel", "Parameter",
+    "PayloadType", "PayloadWidth",
     "Receive", "ReceiveValidity", "RegionOperation", "SemanticDependency", "SemanticDependencyKind",
     "SemanticValidationError", "SemanticallyValidatedTransaction", "Send", "Sequence", "Skip",
-    "SourceLocation", "StageStorage", "StorageSlot", "StructurallyValidatedTransaction", "TimingModel",
+    "RequestFanout", "RequestJoin", "SourceLocation", "StageStorage", "StorageSlot",
+    "StructurallyValidatedTransaction", "TimingModel",
     "TransactionStructureError", "TransactionWarning", "Variable", "analyze_semantics",
     "bind_async_templates", "compile_async_file", "decompose_transaction",
     "emit_async_systemverilog", "emit_conditional_send_decomposition", "expression_payload_type",

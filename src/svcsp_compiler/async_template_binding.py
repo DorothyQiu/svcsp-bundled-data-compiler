@@ -10,11 +10,11 @@ from .async_microarchitecture import (
     EnableChannel,
     EnReceiveStage,
     EnSendStage,
-    InputJoin,
     InputPort,
+    InputRequestDirectConnection,
     MatchedDelayRequirement,
-    OutputFork,
     OutputPort,
+    RequestJoin,
     StorageSlot,
 )
 from .communication_decomposition import EnReceive, EnSend
@@ -36,7 +36,7 @@ class BoundAsyncInstance:
     serializes_inputs: bool | None = None
     serializes_outputs: bool | None = None
     storage_slot: StorageSlot | None = None
-    input_join: InputJoin | None = None
+    input_join: RequestJoin | InputRequestDirectConnection | None = None
     output_port: OutputPort | None = None
     value: None = None
     component: str = ""
