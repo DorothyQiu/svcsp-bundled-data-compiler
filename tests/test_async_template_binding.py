@@ -4,7 +4,11 @@ from __future__ import annotations
 import pytest
 
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
-from svcsp_compiler.async_template_binding import BoundAsyncModule, bind_async_templates
+from svcsp_compiler.async_template_binding import (
+    AsyncTemplateBindingError,
+    BoundAsyncModule,
+    bind_async_templates,
+)
 from svcsp_compiler.behavioral_ir import (
     Assign,
     BehavioralModule,
@@ -12,6 +16,7 @@ from svcsp_compiler.behavioral_ir import (
     Expression,
     If,
     ONE_BIT,
+    Parameter,
     PayloadType,
     PayloadWidth,
     Receive,
@@ -20,8 +25,10 @@ from svcsp_compiler.behavioral_ir import (
     Skip,
     SourceLocation,
     Variable,
+    lower_behavioral,
 )
 from svcsp_compiler.communication_decomposition import decompose_transaction
+from svcsp_compiler.frontend import parse_text
 from svcsp_compiler.semantic_analysis import analyze_semantics
 from svcsp_compiler.transaction import extract_transaction
 
@@ -75,6 +82,11 @@ def _architecture(program: _Program, body):
 
 def _bind(program: _Program, body):
     architecture = _architecture(program, body)
+    return architecture, bind_async_templates(architecture)
+
+
+def _bind_module(module: BehavioralModule):
+    architecture = lower_microarchitecture(analyze_semantics(decompose_transaction(extract_transaction(module))))
     return architecture, bind_async_templates(architecture)
 
 
@@ -576,6 +588,115 @@ def test_distinct_behavioral_variable_identities_never_alias_by_source_spelling(
     right_signal = _variable_signal_id(bound, right)
     assert left_signal != right_signal
     assert {left_signal, right_signal} <= {signal.id for signal in bound.signals}
+
+
+def test_source_module_parameters_bind_in_order_and_remain_distinct_from_instance_parameters() -> None:
+    module = lower_behavioral(parse_text('''module parameterized #(
+parameter int W = 8, parameter int V) (Channel #(W) A, B);
+logic [W-1:0] x;
+always begin A.Receive(x); B.Send(x); end
+endmodule''', 'parameters.sv'))
+    _, bound = _bind_module(module)
+
+    assert [item.name for item in bound.module_parameters] == ['W', 'V']
+    assert bound.module_parameters[0].source is module.parameters[0]
+    assert bound.module_parameters[1].source is module.parameters[1]
+    assert bound.module_parameters[0].source is not bound.module_parameters[1].source
+
+    width_binding = next(item for item in bound.parameter_bindings if item.formal_name == 'WIDTH')
+    assert width_binding.value.symbolic == 'W'
+    assert width_binding.value.parameters[0] is bound.module_parameters[0].source
+
+
+def test_symbolic_external_input_local_and_channel_widths_use_the_exact_module_parameter() -> None:
+    module = lower_behavioral(parse_text('''module parameterized #(parameter int W = 8) (
+input logic [W-1:0] control, Channel #(W) A, B);
+logic [W-1:0] x;
+always begin A.Receive(x); B.Send(x); end
+endmodule''', 'parameters.sv'))
+    _, bound = _bind_module(module)
+
+    source_w = module.parameters[0]
+    assert bound.module_parameters[0].source is source_w
+    assert module.external_inputs[0].payload_type.width.parameters[0] is source_w
+    assert module.variables[0].payload_type.width.parameters[0] is source_w
+    assert module.channels[0].payload_type.width.parameters[0] is source_w
+    assert any(signal.width.parameters and signal.width.parameters[0] is source_w
+               for signal in bound.signals)
+
+
+def test_structurally_equal_but_unowned_expression_parameter_is_rejected() -> None:
+    canonical = Parameter('W', 'manual', SourceLocation('manual.sv', 1, 1), '8')
+    foreign = Parameter('W', 'manual', SourceLocation('manual.sv', 1, 1), '8')
+    payload = _ONE_BIT
+    value = Variable('x', (), SourceLocation('manual.sv', 2, 1), payload)
+    module = BehavioralModule('manual', Sequence((
+        If(Expression('parameter', value='W', parameter=foreign),
+           Receive(ChannelEndpoint('A', payload_type=payload), value), Skip()),
+        Send(ChannelEndpoint('B', payload_type=payload), Expression('literal', value="1'b0")),
+    )), (), (value,), parameters=(canonical,))
+
+    with pytest.raises(AsyncTemplateBindingError, match='module parameter binding'):
+        _bind_module(module)
+
+
+def test_structurally_equal_but_unowned_payload_width_parameter_is_rejected() -> None:
+    canonical = Parameter('W', 'manual', SourceLocation('manual.sv', 1, 1), '8')
+    foreign = Parameter('W', 'manual', SourceLocation('manual.sv', 1, 1), '8')
+    payload = PayloadType('logic', PayloadWidth(symbolic='W', parameters=(foreign,)))
+    value = Variable('x', (), SourceLocation('manual.sv', 2, 1), payload)
+    module = BehavioralModule('manual', Sequence((
+        Receive(ChannelEndpoint('A', payload_type=payload), value),
+        Send(ChannelEndpoint('B', payload_type=payload), Expression('name', value='x', variable=value)),
+    )), (), (value,), parameters=(canonical,))
+
+    with pytest.raises(AsyncTemplateBindingError, match='module parameter binding'):
+        _bind_module(module)
+
+
+def test_duplicate_source_module_parameter_names_are_rejected() -> None:
+    first = Parameter('W', 'manual', SourceLocation('manual.sv', 1, 1), '8')
+    second = Parameter('W', 'manual', SourceLocation('manual.sv', 2, 1), '4')
+    value = Variable('x', (), SourceLocation('manual.sv', 3, 1), _ONE_BIT)
+    module = BehavioralModule('manual', Sequence((
+        Receive(ChannelEndpoint('A', payload_type=_ONE_BIT), value),
+        Send(ChannelEndpoint('B', payload_type=_ONE_BIT), Expression('literal', value="1'b0")),
+    )), (), (value,), parameters=(first, second))
+
+    with pytest.raises(AsyncTemplateBindingError, match='duplicate module parameter'):
+        _bind_module(module)
+
+
+def test_module_parameter_generated_internal_signal_name_conflict_is_rejected() -> None:
+    parameter = Parameter('body_var_0_x', 'manual', SourceLocation('manual.sv', 1, 1), '1')
+    value = Variable('x', (), SourceLocation('manual.sv', 2, 1), _ONE_BIT)
+    module = BehavioralModule('manual', Sequence((
+        Receive(ChannelEndpoint('A', payload_type=_ONE_BIT), value),
+        Send(ChannelEndpoint('B', payload_type=_ONE_BIT), Expression('name', value='x', variable=value)),
+    )), (), (value,), parameters=(parameter,))
+
+    with pytest.raises(AsyncTemplateBindingError, match='conflicts with generated signal body_var_0_x'):
+        _bind_module(module)
+
+
+@pytest.mark.parametrize('parameter_name, external_name', [('reset_n', None), ('select', 'select')])
+def test_module_parameter_public_port_name_conflicts_are_rejected(parameter_name, external_name) -> None:
+    parameter = Parameter(parameter_name, 'manual', SourceLocation('manual.sv', 1, 1), '1')
+    payload = _ONE_BIT
+    value = Variable('x', (), SourceLocation('manual.sv', 2, 1), payload)
+    external_inputs = ()
+    condition = Expression('literal', value="1'b1")
+    if external_name is not None:
+        external = Variable(external_name, (), SourceLocation('manual.sv', 3, 1), payload)
+        external_inputs = (external,)
+        condition = Expression('name', value=external_name, variable=external)
+    module = BehavioralModule('manual', Sequence((
+        If(condition, Receive(ChannelEndpoint('A', payload_type=payload), value), Skip()),
+        Send(ChannelEndpoint('B', payload_type=payload), Expression('literal', value="1'b0")),
+    )), (), (value,), parameters=(parameter,), external_inputs=external_inputs)
+
+    with pytest.raises(AsyncTemplateBindingError, match='conflicts with public port'):
+        _bind_module(module)
 
 
 def test_external_input_binds_to_an_exact_public_signal_not_a_body_variable() -> None:

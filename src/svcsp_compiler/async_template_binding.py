@@ -101,6 +101,14 @@ class BoundAsyncParameterBinding:
 
 
 @dataclass(frozen=True)
+class BoundAsyncModuleParameter:
+    """An exact source parameter bound to the generated module interface."""
+
+    source: behavioral.Parameter
+    name: str
+
+
+@dataclass(frozen=True)
 class BoundAsyncAssignment:
     target_signal_id: str
     expression: behavioral.Expression | None
@@ -144,6 +152,7 @@ class BoundAsyncModule:
     port_bindings: tuple[BoundAsyncPortBinding, ...] = ()
 
     parameter_bindings: tuple[BoundAsyncParameterBinding, ...] = ()
+    module_parameters: tuple[BoundAsyncModuleParameter, ...] = ()
     enable_channels: tuple[BoundEnableChannel, ...] = ()
 
     assignments: tuple[BoundAsyncAssignment, ...] = ()
@@ -167,6 +176,72 @@ def bind_async_templates(
     bindings: list[BoundAsyncPortBinding] = []
     parameters: list[BoundAsyncParameterBinding] = []
     assignments: list[BoundAsyncAssignment] = []
+    behavioral_module = architecture.validated.decomposed.transaction.behavioral
+    module_parameters: list[BoundAsyncModuleParameter] = []
+    module_parameter_names: set[str] = set()
+
+    for source in behavioral_module.parameters:
+        if source.name in module_parameter_names:
+            raise AsyncTemplateBindingError(f"duplicate module parameter {source.name}")
+        module_parameter_names.add(source.name)
+        module_parameters.append(BoundAsyncModuleParameter(source, source.name))
+
+    def module_parameter(parameter: behavioral.Parameter) -> BoundAsyncModuleParameter:
+        found = [item for item in module_parameters if item.source is parameter]
+        if len(found) != 1:
+            raise AsyncTemplateBindingError(
+                f"missing or ambiguous module parameter binding for {parameter.name}"
+            )
+        return found[0]
+
+    def validate_width(width: behavioral.PayloadWidth) -> None:
+        if width.symbolic is not None and not width.parameters:
+            raise AsyncTemplateBindingError("symbolic payload width lacks module parameter ownership")
+        for parameter in width.parameters:
+            module_parameter(parameter)
+
+    def validate_expression(expression: behavioral.Expression) -> None:
+        if expression.parameter is not None:
+            module_parameter(expression.parameter)
+        for operand in expression.operands:
+            validate_expression(operand)
+
+    def validate_process(process: behavioral.Process) -> None:
+        if isinstance(process, behavioral.Sequence):
+            for item in process.items:
+                validate_process(item)
+            return
+        if isinstance(process, behavioral.Parallel):
+            for branch in process.branches:
+                validate_process(branch)
+            return
+        if isinstance(process, behavioral.If):
+            validate_expression(process.condition)
+            validate_process(process.then_branch)
+            validate_process(process.else_branch)
+            return
+        if isinstance(process, behavioral.Assign):
+            if isinstance(process.target, behavioral.Expression):
+                validate_expression(process.target)
+            validate_expression(process.value)
+            return
+        if isinstance(process, behavioral.Receive):
+            if isinstance(process.target, behavioral.Expression):
+                validate_expression(process.target)
+            for selector in process.channel.selectors:
+                validate_expression(selector)
+            return
+        if isinstance(process, behavioral.Send):
+            validate_expression(process.value)
+            for selector in process.channel.selectors:
+                validate_expression(selector)
+
+    for variable in (*behavioral_module.variables, *behavioral_module.external_inputs):
+        validate_width(variable.payload_type.width)
+    for channel in behavioral_module.channels:
+        if channel.payload_type is not None:
+            validate_width(channel.payload_type.width)
+    validate_process(behavioral_module.body)
 
     def ensure(
         name: str,
@@ -174,6 +249,9 @@ def bind_async_templates(
         width: behavioral.PayloadWidth,
         endpoint: behavioral.ChannelEndpoint | None = None,
     ) -> str:
+        validate_width(width)
+        if name in module_parameter_names:
+            raise AsyncTemplateBindingError(f"module parameter conflicts with generated signal {name}")
         existing = [item for item in signals if item.id == name]
         if existing:
             if len(existing) != 1 or existing[0] != BoundAsyncSignal(name, kind, width, endpoint):
@@ -210,6 +288,7 @@ def bind_async_templates(
         formal: str,
         value: behavioral.PayloadWidth,
     ) -> None:
+        validate_width(value)
         parameters.append(
             BoundAsyncParameterBinding(
                 item.id,
@@ -227,6 +306,8 @@ def bind_async_templates(
     ) -> str:
         name = f"channel_{_endpoint_name(endpoint)}_{flow}_{role}"
 
+        if name in module_parameter_names:
+            raise AsyncTemplateBindingError(f"module parameter conflicts with public port {name}")
         if any(port.name == name for port in ports):
             raise AsyncTemplateBindingError(f"duplicate or conflicting public port {name}")
 
@@ -255,6 +336,8 @@ def bind_async_templates(
         """Bind one declared external-input identity to its public RTL port."""
 
         name = variable.name
+        if name in module_parameter_names:
+            raise AsyncTemplateBindingError(f"module parameter conflicts with public port {name}")
         if any(port.name == name for port in ports):
             raise AsyncTemplateBindingError(f"duplicate or conflicting public port {name}")
         ensure(name, "payload", variable.payload_type.width)
@@ -271,6 +354,8 @@ def bind_async_templates(
         )
         return name
 
+    if "reset_n" in module_parameter_names:
+        raise AsyncTemplateBindingError("module parameter conflicts with public port reset_n")
     reset_n = ensure(
         "reset_n",
         "control",
@@ -290,7 +375,6 @@ def bind_async_templates(
     )
 
     variables: list[BoundAsyncVariableBinding] = []
-    behavioral_module = architecture.validated.decomposed.transaction.behavioral
     external_inputs = behavioral_module.external_inputs
 
     for variable in external_inputs:
@@ -1084,6 +1168,7 @@ def bind_async_templates(
         ),
         tuple(bindings),
         tuple(parameters),
+        tuple(module_parameters),
         tuple(enable_bindings),
         tuple(assignments),
         tuple(variables),
