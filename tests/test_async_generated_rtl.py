@@ -97,10 +97,12 @@ def test_generated_constant_1r1s_completes_one_four_phase_transaction(tmp_path: 
 
     _simulate_generated(tmp_path, "constant_1r1s", rtl, """
 module tb;
+  reg reset_n = 0;
   reg channel_A_receive_request = 0, channel_A_receive_payload = 0;
   reg channel_B_send_acknowledge = 0;
   wire channel_A_receive_acknowledge, channel_B_send_request, channel_B_send_payload;
   generated_constant_1r1s dut (.*);
+  initial begin #1; reset_n = 1'b1; end
   initial begin
     #100; $fatal(1, "deadlock");
   end
@@ -133,12 +135,14 @@ def test_generated_byte_passthrough_rearms_for_two_transactions(tmp_path: Path) 
 
     _simulate_generated(tmp_path, "byte_passthrough", rtl, """
 module tb;
+  reg reset_n = 0;
   reg channel_A_receive_request = 0;
   reg [7:0] channel_A_receive_payload = 0;
   reg channel_B_send_acknowledge = 0;
   wire channel_A_receive_acknowledge, channel_B_send_request;
   wire [7:0] channel_B_send_payload;
   generated_byte_passthrough dut (.*);
+  initial begin #1; reset_n = 1'b1; end
   task receive_a(input [7:0] value);
     begin
       channel_A_receive_payload = value;
@@ -180,10 +184,12 @@ def test_generated_post_input_conditional_send_preserves_disabled_body_completio
 
     _simulate_generated(tmp_path, "conditional_send", rtl, """
 module tb;
+  reg reset_n = 0;
   reg channel_A_receive_request = 0, channel_A_receive_payload = 0;
   reg channel_B_send_acknowledge = 0;
   wire channel_A_receive_acknowledge, channel_B_send_request, channel_B_send_payload;
   generated_conditional_send dut (.*);
+  initial begin #1; reset_n = 1'b1; end
   task receive_a(input value);
     begin
       channel_A_receive_payload = value;
@@ -238,10 +244,12 @@ def test_generated_pre_input_conditional_receive_uses_enabled_or_dummy_body_toke
 
     _simulate_generated(tmp_path, f"conditional_receive_{condition[-1]}", rtl, f"""
 module tb;
+  reg reset_n = 0;
   reg channel_A_receive_request = 0, channel_A_receive_payload = 0;
   reg channel_B_send_acknowledge = 0;
   wire channel_A_receive_acknowledge, channel_B_send_request, channel_B_send_payload;
   {module_name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
   initial begin
     #150; $fatal(1, "deadlock");
   end

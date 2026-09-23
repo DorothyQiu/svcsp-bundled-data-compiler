@@ -17,24 +17,51 @@ IVERILOG = shutil.which('iverilog')
 
 def test_target_fixture_compiles_through_the_complete_async_flow(tmp_path: Path) -> None:
     rtl = compile_async_file(FIXTURE)
-    generated = tmp_path / 'target_receive_add_send.sv'
+    generated = tmp_path / "target_receive_add_send.sv"
     generated.write_text(rtl)
 
-    assert 'four_phase_input_join' in rtl
-    assert 'bundled_data_storage' in rtl
-    assert 'four_phase_output_fork' in rtl
-    assert 'bundled_data_matched_delay' in rtl
-    assert '.WIDTH(8)' in rtl
+    # receive_add_send is a 1R1S transaction.
+    # Per the documented M6 architecture, both sides use direct connections
+    # around exactly one ordinary BODY half-buffer controller.
+    assert "four_phase_half_buffer_controller" in rtl
+    assert "bundled_data_latch_bank" in rtl
+    assert "bundled_data_matched_delay" in rtl
+    assert ".WIDTH(8)" in rtl
+
+    # N=1: no request join or input-ACK fanout.
+    assert "four_phase_request_join" not in rtl
+    assert "four_phase_ack_fanout" not in rtl
+
+    # M=1: no request fanout or output-ACK join.
+    assert "four_phase_request_fanout" not in rtl
+    assert "four_phase_ack_join" not in rtl
+
+    # Retired generalized topology must not reappear.
+    assert "four_phase_input_join" not in rtl
+    assert "four_phase_output_fork" not in rtl
+    assert "four_phase_output_completion" not in rtl
+    assert "bundled_data_storage" not in rtl
 
     if not IVERILOG:
-        pytest.skip('Icarus Verilog is not available')
+        pytest.skip("Icarus Verilog is not available")
+
     compile_result = subprocess.run(
-        [IVERILOG, '-g2012', '-s', 'receive_add_send', '-o', str(tmp_path / 'generated'),
-         *(str(source) for source in RTL_LIBRARY), str(generated)],
-        cwd=ROOT, text=True, capture_output=True, check=False,
+        [
+            IVERILOG,
+            "-g2012",
+            "-s",
+            "receive_add_send",
+            "-o",
+            str(tmp_path / "generated"),
+            *(str(source) for source in RTL_LIBRARY),
+            str(generated),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert compile_result.returncode == 0, compile_result.stderr
-
 
 @pytest.mark.parametrize(('source_text', 'expected'), (
     ('''module parallel(interface A, B, C); logic x, y; always begin fork

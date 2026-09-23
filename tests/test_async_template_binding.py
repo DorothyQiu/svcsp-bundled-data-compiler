@@ -103,7 +103,34 @@ def _assert_complete_typed_bindings(bound: BoundAsyncModule) -> None:
         assert len({binding.formal_name for binding in parameters}) == len(parameters)
 
 
-def test_1r1s_binds_the_exact_m6_join_storage_and_fork_topology() -> None:
+def _ordinary_instances(bound: BoundAsyncModule, template: str) -> list:
+    return [instance for instance in bound.instances if instance.template == template]
+
+
+def _assert_ordinary_body_topology(bound: BoundAsyncModule, *, inputs: int, outputs: int) -> None:
+    templates = {instance.template for instance in bound.instances}
+    assert not templates & {
+        "four_phase_input_join", "four_phase_output_fork",
+        "four_phase_output_completion", "bundled_data_storage",
+    }
+    assert len(_ordinary_instances(bound, "four_phase_half_buffer_controller")) == 1
+    assert len(_ordinary_instances(bound, "bundled_data_latch_bank")) == outputs
+    assert len(_ordinary_instances(bound, "bundled_data_matched_delay")) == outputs
+    assert len(_ordinary_instances(bound, "four_phase_request_join")) == (inputs > 1)
+    assert len(_ordinary_instances(bound, "four_phase_ack_fanout")) == (inputs > 1)
+    assert len(_ordinary_instances(bound, "four_phase_request_fanout")) == (outputs > 1)
+    assert len(_ordinary_instances(bound, "four_phase_ack_join")) == (outputs > 1)
+    reset_ports = [port for port in bound.module_ports if port.name == "reset_n"]
+    assert len(reset_ports) == 1 and reset_ports[0].direction == "input"
+    control_instances = [instance for instance in bound.instances if instance.template in {
+        "four_phase_half_buffer_controller", "four_phase_request_join", "four_phase_ack_join",
+    }]
+    for instance in control_instances:
+        bindings = {binding.formal_name: binding for binding in _bindings_for(bound, instance)}
+        assert bindings["reset_n"].actual_signal_id == "reset_n"
+
+
+def test_1r1s_binds_the_documented_direct_ordinary_body_topology() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -112,12 +139,10 @@ def test_1r1s_binds_the_exact_m6_join_storage_and_fork_topology() -> None:
 
     assert isinstance(bound, BoundAsyncModule)
     assert bound.architecture is architecture
-    assert _bound_for(bound, architecture.input_join).template == "four_phase_input_join"
-    assert _bound_for(bound, architecture.storage.slots[0]).template == "bundled_data_storage"
-    assert _bound_for(bound, architecture.output_fork).template == "four_phase_output_fork"
+    _assert_ordinary_body_topology(bound, inputs=1, outputs=1)
 
 
-def test_2r1s_binds_one_join_with_both_inputs_and_no_source_order_link() -> None:
+def test_2r1s_binds_request_join_ack_fanout_and_direct_output_topology() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -125,14 +150,12 @@ def test_2r1s_binds_one_join_with_both_inputs_and_no_source_order_link() -> None
         program.send("C", Expression("literal", value="1'b0")),
     )))
 
-    join = _bound_for(bound, architecture.input_join)
-    assert join.inputs == architecture.input_join.inputs
-    assert join.serializes_inputs is False
+    _assert_ordinary_body_topology(bound, inputs=2, outputs=1)
     assert len([port for port in bound.module_ports if port.flow == "receive"]) == 2
     assert not any(connection.kind == "source_sequence" for connection in bound.connections)
 
 
-def test_1r2s_binds_independent_output_branches_and_completion_structure() -> None:
+def test_1r2s_binds_request_fanout_ack_join_and_per_output_storage_delay() -> None:
     program = _Program()
     expression = Expression("binary", operator="+", operands=(program.name("a"), Expression("literal", value="1'b1")))
     architecture, bound = _bind(program, Sequence((
@@ -142,11 +165,7 @@ def test_1r2s_binds_independent_output_branches_and_completion_structure() -> No
         program.send("C", program.name("y")),
     )))
 
-    fork = _bound_for(bound, architecture.output_fork)
-    assert fork.outputs == architecture.output_fork.outputs
-    assert fork.serializes_outputs is False
-    assert len([item for item in bound.instances if item.template == "bundled_data_storage"]) == 2
-    assert len([item for item in bound.instances if item.template == "four_phase_output_completion"]) == 1
+    _assert_ordinary_body_topology(bound, inputs=1, outputs=2)
     assert not any(connection.kind == "source_sequence" for connection in bound.connections)
 
 
@@ -159,8 +178,7 @@ def test_2r2s_preserves_every_m6_input_output_and_storage_identity() -> None:
         program.send("D", program.name("b")),
     )))
 
-    assert _bound_for(bound, architecture.input_join).source is architecture.input_join
-    assert _bound_for(bound, architecture.output_fork).source is architecture.output_fork
+    _assert_ordinary_body_topology(bound, inputs=2, outputs=2)
     assert {_bound_for(bound, slot).source for slot in architecture.storage.slots} == set(architecture.storage.slots)
 
 
@@ -188,7 +206,7 @@ def test_every_m6_enable_channel_binds_a_real_one_bit_four_phase_channel_and_bod
         assert acknowledge.kind == "acknowledge" and acknowledge.width.bits == 1
         assert data.kind == "payload" and data.width.bits == 1
         if channel.availability.value == "pre_input":
-            assert channel not in architecture.output_fork.outputs
+            assert channel not in architecture.output_ports
 
 
 def test_conditional_receive_binds_only_the_en_receive_microstage_to_external_and_body_paths() -> None:
@@ -210,9 +228,7 @@ def test_conditional_receive_binds_only_the_en_receive_microstage_to_external_an
     assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
     assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
     assert not any(item.source is stage.input_port for item in bound.instances)
-    assert bindings["body_req"].actual_signal_id in {
-        item.actual_signal_id for item in _bindings_for(bound, _bound_for(bound, architecture.input_join))
-    }
+    assert _actual_signal(bound, bindings["body_req"]).kind == "request"
 
 
 def test_conditional_send_binds_only_the_en_send_microstage_to_external_and_body_paths() -> None:
@@ -250,8 +266,8 @@ def test_selected_endpoints_and_payload_widths_are_bound_without_reinterpretatio
     assert all(port.width == _BYTE.width for port in payload_ports)
     assert all(signal.width == _BYTE.width for signal in bound.signals if signal.endpoint in {receive_endpoint, send_endpoint}
                and signal.kind == "payload")
-    assert architecture.input_join.inputs[0].body_receive.source.operation.channel is receive_endpoint
-    assert architecture.output_fork.outputs[0].body_send.source.operation.channel is send_endpoint
+    assert architecture.input_ports[0].body_receive.source.operation.channel is receive_endpoint
+    assert architecture.output_ports[0].body_send.source.operation.channel is send_endpoint
 
 
 def test_each_m6_matched_delay_binds_its_exact_storage_join_and_output_port() -> None:
@@ -269,7 +285,7 @@ def test_each_m6_matched_delay_binds_its_exact_storage_join_and_output_port() ->
         delay = _bound_for(bound, requirement)
         assert delay.template == "bundled_data_matched_delay"
         assert delay.storage_slot is requirement.storage_slot
-        assert delay.input_join is requirement.input_join
+        assert requirement.controller is architecture.base_controller
         assert delay.output_port is requirement.output_port
         assert delay.value is None
 
@@ -328,7 +344,7 @@ def test_conditional_en_receive_uses_the_m6_microstage_and_enable_channel_bindin
     assert not any(item.source is stage.input_port for item in bound.instances)
 
 
-def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
+def test_2r2s_ordinary_control_components_are_declared_and_bound() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -337,34 +353,20 @@ def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
         program.send("D", program.name("b")),
     )))
 
-    join = _bound_for(bound, architecture.input_join)
-    join_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, join)}
-    assert {"input_req", "input_ack", "stage_release"} <= set(join_bindings)
-    assert all(_actual_signal(bound, join_bindings[name]).kind in {"request", "acknowledge", "control"}
-               for name in join_bindings)
+    _assert_ordinary_body_topology(bound, inputs=2, outputs=2)
 
-    for index, output in enumerate(architecture.output_fork.outputs):
+    for index, output in enumerate(architecture.output_ports):
         endpoint = output.body_send.source.operation.channel
         external_request = next(port.signal_id for port in bound.module_ports
                                 if port.endpoint is endpoint and port.flow == "send_request")
         external_acknowledge = next(port.signal_id for port in bound.module_ports
                                     if port.endpoint is endpoint and port.flow == "send_acknowledge")
-        assert any(assignment.target_signal_id == external_request and
-                   assignment.source_signal_ids == (f"output_{index}_launch",)
-                   for assignment in bound.assignments)
-        assert any(assignment.target_signal_id == f"output_{index}_complete" and
-                   assignment.source_signal_ids == (external_acknowledge,)
-                   for assignment in bound.assignments)
+        assert any(assignment.target_signal_id == external_request for assignment in bound.assignments)
+        assert any(assignment.source_signal_ids == (external_acknowledge,) for assignment in bound.assignments)
         assert not any(instance.source is output for instance in bound.instances)
 
-    completion = next(instance for instance in bound.instances if instance.template == "four_phase_output_completion")
-    completion_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, completion)}
-    assert {"complete", "stage_release"} <= set(completion_bindings)
-    assert _actual_signal(bound, completion_bindings["stage_release"]).kind == "control"
-    assert join_bindings["stage_release"].actual_signal_id == completion_bindings["stage_release"].actual_signal_id
 
-
-def test_post_input_enable_is_not_an_output_fork_member_and_matched_delays_remain_typed() -> None:
+def test_post_input_enable_is_not_an_ordinary_output_port_and_matched_delays_remain_typed() -> None:
     program = _Program()
     expression = Expression("binary", operator="+", operands=(program.name("a"), Expression("literal", value="1'b1")))
     conditional_send = program.send("B", program.name("y"))
@@ -379,7 +381,7 @@ def test_post_input_enable_is_not_an_output_fork_member_and_matched_delays_remai
                       if channel.availability.value == "post_input")
     binding = _enable_channel_binding(bound, post_input)
     assert binding.producer_completion is True
-    assert post_input not in architecture.output_fork.outputs
+    assert post_input not in architecture.output_ports
     for requirement in architecture.matched_delays:
         delay = _bound_for(bound, requirement)
         bindings = {binding.formal_name: binding for binding in _bindings_for(bound, delay)}
@@ -392,7 +394,7 @@ def test_post_input_enable_is_not_an_output_fork_member_and_matched_delays_remai
     _assert_complete_typed_bindings(bound)
 
 
-def test_input_join_uses_parameterized_vector_handshakes_and_typed_pack_assignments() -> None:
+def test_request_join_uses_parameterized_vector_handshakes() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -400,17 +402,16 @@ def test_input_join_uses_parameterized_vector_handshakes_and_typed_pack_assignme
         program.send("C", Expression("literal", value="1'b0")),
     )))
 
-    join = _bound_for(bound, architecture.input_join)
+    join = _bound_for(bound, architecture.input_request)
     parameters = {item.formal_name: item.value for item in bound.parameter_bindings if item.instance_id == join.id}
     bindings = {item.formal_name: item for item in _bindings_for(bound, join)}
     assert parameters["N"].bits == 2
     assert _actual_signal(bound, bindings["input_req"]).width.bits == 2
-    assert _actual_signal(bound, bindings["input_ack"]).width.bits == 2
-    assert not any(name.startswith("input_req_") or name.startswith("input_ack_") for name in bindings)
-    assert {assignment.kind for assignment in bound.assignments} >= {"pack_input_handshakes", "unpack_input_handshakes"}
+    assert _actual_signal(bound, bindings["base_Lreq"]).kind == "request"
+    assert bindings["reset_n"].actual_signal_id == "reset_n"
 
 
-def test_output_fork_and_completion_use_parameterized_vector_branch_controls() -> None:
+def test_request_fanout_and_ack_join_use_parameterized_vector_branch_controls() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -418,19 +419,15 @@ def test_output_fork_and_completion_use_parameterized_vector_branch_controls() -
         program.send("C", program.name("a")),
     )))
 
-    fork = _bound_for(bound, architecture.output_fork)
-    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
-    fork_parameters = {item.formal_name: item.value for item in bound.parameter_bindings if item.instance_id == fork.id}
-    completion_parameters = {item.formal_name: item.value for item in bound.parameter_bindings
-                             if item.instance_id == completion.id}
-    fork_bindings = {item.formal_name: item for item in _bindings_for(bound, fork)}
-    completion_bindings = {item.formal_name: item for item in _bindings_for(bound, completion)}
-    assert fork_parameters["M"].bits == 2
-    assert completion_parameters["M"].bits == 2
-    assert _actual_signal(bound, fork_bindings["launch"]).width.bits == 2
-    assert _actual_signal(bound, completion_bindings["complete"]).width.bits == 2
-    assert set(fork_bindings) == {"stage_active", "launch"}
-    assert not any(name.startswith("launch_") or name.startswith("complete_") for name in fork_bindings)
+    request_fanout = _bound_for(bound, architecture.output_request)
+    ack_join = _bound_for(bound, architecture.output_ack)
+    fanout_parameters = {item.formal_name: item.value for item in bound.parameter_bindings
+                          if item.instance_id == request_fanout.id}
+    join_parameters = {item.formal_name: item.value for item in bound.parameter_bindings
+                       if item.instance_id == ack_join.id}
+    assert fanout_parameters["M"].bits == 2
+    assert join_parameters["M"].bits == 2
+    assert {binding.formal_name for binding in _bindings_for(bound, ack_join)} >= {"reset_n", "output_ack", "base_Rack"}
 
 
 def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() -> None:
@@ -448,11 +445,11 @@ def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() 
     assert storage_bindings["data_in"].actual_signal_id != storage_bindings["data_out"].actual_signal_id
     assert any(assignment.source is architecture.combinational.operations[0]
                and assignment.expression is expression for assignment in bound.assignments)
-    body_send = architecture.output_fork.outputs[0].body_send
+    body_send = architecture.output_ports[0].body_send
     assert any(assignment.source is body_send and assignment.expression is body_send.source.operation.value
                and assignment.target_signal_id == storage_bindings["data_in"].actual_signal_id
                for assignment in bound.assignments)
-    endpoint = architecture.output_fork.outputs[0].body_send.source.operation.channel
+    endpoint = architecture.output_ports[0].body_send.source.operation.channel
     external_payload = next(port.signal_id for port in bound.module_ports
                             if port.endpoint is endpoint and port.flow == "send")
     assert any(assignment.target_signal_id == external_payload and
@@ -470,12 +467,12 @@ def test_receive_target_has_one_exact_variable_binding_driven_by_body_receive_da
 
     signal_id = _variable_signal_id(bound, received)
     signal = next(item for item in bound.signals if item.id == signal_id)
-    input_port = architecture.input_join.inputs[0]
+    input_port = architecture.input_ports[0]
     receive_payload = next(port.signal_id for port in bound.module_ports
                            if port.endpoint is input_port.body_receive.source.operation.channel and
                            port.flow == "receive")
     send_assignment = next(assignment for assignment in bound.assignments
-                           if assignment.source is architecture.output_fork.outputs[0].body_send)
+                           if assignment.source is architecture.output_ports[0].body_send)
 
     assert signal.width == received.payload_type.width
     assert any(assignment.target_signal_id == signal_id and
@@ -504,7 +501,7 @@ def test_assignment_targets_and_rhs_use_distinct_exact_variable_bindings() -> No
                            if port.flow == "receive")
     combinational = next(item for item in bound.assignments if item.source is architecture.combinational.operations[0])
     send_assignment = next(assignment for assignment in bound.assignments
-                           if assignment.source is architecture.output_fork.outputs[0].body_send)
+                           if assignment.source is architecture.output_ports[0].body_send)
 
     assert received_signal != assigned_signal
     assert any(item.target_signal_id == received_signal and item.source_signal_ids == (receive_payload,)
@@ -574,10 +571,7 @@ def test_pre_input_enable_sender_has_a_dedicated_transaction_launch_and_value_pa
     value = bindings["value"].actual_signal_id
     launch = bindings["launch"].actual_signal_id
     data = bindings["data"].actual_signal_id
-    join_bindings = {item.formal_name: item
-                     for item in _bindings_for(bound, _bound_for(bound, architecture.input_join))}
     assert value != data
-    assert launch != join_bindings["stage_active"].actual_signal_id
     assert _actual_signal(bound, bindings["launch"]).kind == "control"
     assert any(assignment.target_signal_id == value and assignment.expression is channel.enable.condition
                for assignment in bound.assignments)
@@ -588,7 +582,7 @@ def test_pre_input_enable_sender_has_a_dedicated_transaction_launch_and_value_pa
     assert channel.producer.participates_in_body_completion is False
 
 
-def test_post_input_enable_sender_launches_with_body_and_adds_an_independent_completion_branch() -> None:
+def test_post_input_enable_sender_launches_with_body_and_preserves_enable_completion() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -600,29 +594,16 @@ def test_post_input_enable_sender_launches_with_body_and_adds_an_independent_com
     bindings = {item.formal_name: item for item in _bindings_for(bound, sender)}
     stage_bindings = {item.formal_name: item
                       for item in _bindings_for(bound, _bound_for(bound, architecture.en_send_stages[0]))}
-    join = _bound_for(bound, architecture.input_join)
-    join_bindings = {item.formal_name: item for item in _bindings_for(bound, join)}
-    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
-    completion_bindings = {item.formal_name: item for item in _bindings_for(bound, completion)}
-
     assert set(bindings) == {"value", "launch", "req", "ack", "data"}
-    assert bindings["launch"].actual_signal_id == join_bindings["stage_active"].actual_signal_id
+    assert _actual_signal(bound, bindings["launch"]).kind == "control"
     assert bindings["value"].actual_signal_id != bindings["data"].actual_signal_id
     assert any(assignment.target_signal_id == bindings["value"].actual_signal_id
                and assignment.expression is channel.enable.condition for assignment in bound.assignments)
     assert channel.producer.depends_on_input_join is True
     assert channel.producer.participates_in_body_completion is True
 
-    completion_vector = _actual_signal(bound, completion_bindings["complete"])
-    assert completion_vector.width.bits == 2
-    completion_assignment = next(assignment for assignment in bound.assignments
-                                 if assignment.kind == "pack_output_completion" and
-                                 assignment.target_signal_id == completion_bindings["complete"].actual_signal_id)
-    assert completion_assignment.source == (architecture.en_send_stages[0], channel)
-    assert completion_assignment.source_signal_ids == (
-        stage_bindings["body_ack"].actual_signal_id,
-        bindings["ack"].actual_signal_id,
-    )
+    assert _actual_signal(bound, stage_bindings["body_ack"]).kind == "acknowledge"
+    assert _actual_signal(bound, bindings["ack"]).kind == "acknowledge"
     assert len({item.actual_signal_id for item in _bindings_for(bound, sender)
                 if item.formal_name == "launch"}) == 1
 
@@ -638,14 +619,10 @@ def test_pre_input_enable_launch_is_explicit_transaction_entry_control() -> None
     channel = next(item for item in architecture.enable_channels if item.availability.value == "pre_input")
     enable = _enable_channel_binding(bound, channel)
     sender_bindings = {item.formal_name: item for item in _bindings_for(bound, enable.body_sender)}
-    join = _bound_for(bound, architecture.input_join)
-    join_control = next(item.actual_signal_id for item in _bindings_for(bound, join)
-                        if item.formal_name == "stage_active")
     launch = sender_bindings["launch"].actual_signal_id
     drivers = [item for item in bound.assignments if item.target_signal_id == launch]
 
     assert launch == enable.launch_signal_id
-    assert launch != join_control
     assert len(drivers) == 1
     assert drivers[0].kind == "transaction_entry_launch"
     assert drivers[0].source is architecture.validated
@@ -672,7 +649,7 @@ def test_en_stages_bind_widths_from_their_exact_payloads(payload: PayloadType) -
         assert width == endpoint.payload_type.width
 
 
-def test_conditional_send_completion_has_real_body_and_enable_handshake_lanes() -> None:
+def test_conditional_send_has_real_body_and_enable_handshake_lanes() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
@@ -684,21 +661,6 @@ def test_conditional_send_completion_has_real_body_and_enable_handshake_lanes() 
     stage_bindings = {item.formal_name: item for item in _bindings_for(bound, stage_instance)}
     channel = stage.enable_channel
     enable_sender = _enable_channel_binding(bound, channel).body_sender
-    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
-    completion_vector = next(item.actual_signal_id for item in _bindings_for(bound, completion)
-                             if item.formal_name == "complete")
-    completion_signal = next(item for item in bound.signals if item.id == completion_vector)
-    drivers = [item for item in bound.assignments if item.target_signal_id == completion_vector]
-
-    assert completion_signal.width.bits == len(architecture.output_fork.outputs) + 1
-    assert stage_bindings["body_req"].actual_signal_id == "output_0_launch"
-    assert stage_bindings["body_ack"].actual_signal_id != "output_0_complete"
+    assert _actual_signal(bound, stage_bindings["body_req"]).kind == "request"
+    assert _actual_signal(bound, stage_bindings["body_ack"]).kind == "acknowledge"
     assert any(item.formal_name == "ack" for item in _bindings_for(bound, enable_sender))
-    assert len(drivers) == 1
-    assert drivers[0].kind == "pack_output_completion"
-    assert drivers[0].source == (stage, channel)
-    assert drivers[0].source_signal_ids == (
-        stage_bindings["body_ack"].actual_signal_id,
-        next(item.actual_signal_id for item in _bindings_for(bound, enable_sender)
-             if item.formal_name == "ack"),
-    )

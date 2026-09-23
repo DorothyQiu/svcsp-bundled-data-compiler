@@ -141,15 +141,11 @@ def _assignment_rhs(assignment, bound: BoundAsyncModule) -> str:
         if len(assignment.source_signal_ids) != 1:
             raise AsyncRTLCodegenError("transaction-entry launch requires one control source")
         return f"~{assignment.source_signal_ids[0]}"
-    if assignment.kind == "pack_output_completion":
+    if assignment.kind == "pack_control_vector":
         if not assignment.source_signal_ids:
-            raise AsyncRTLCodegenError("completion packing lacks bound source signals")
+            raise AsyncRTLCodegenError("control-vector packing lacks bound source signals")
         return _concatenate(list(assignment.source_signal_ids))
-    if assignment.kind == "pack_input_handshakes":
-        if not assignment.source_signal_ids:
-            raise AsyncRTLCodegenError("input packing lacks bound source signals")
-        return _concatenate(list(assignment.source_signal_ids))
-    if assignment.kind in {"signal_copy", "unpack_input_handshakes", "unpack_output_launch"}:
+    if assignment.kind in {"signal_copy", "unpack_control_vector"}:
         if len(assignment.source_signal_ids) != 1:
             raise AsyncRTLCodegenError(f"{assignment.kind} requires one bound source signal")
         source = assignment.source_signal_ids[0]
