@@ -143,6 +143,19 @@ endmodule
     assert result['operations'][0]['location'] == {'file': 'locations.sv', 'line': 4, 'column': 3}
 
 
+def test_parameter_int_declarations_preserve_source_order_defaults_and_locations():
+    result = parse_text('''module m #(parameter int W = 8, parameter int V) (Channel #(W) C);
+logic [V-1:0] x;
+always C.Send(x);
+endmodule
+''', 'parameters.sv')
+
+    assert [parameter['name'] for parameter in result['parameters']] == ['W', 'V']
+    assert [parameter['default'] for parameter in result['parameters']] == ['8', None]
+    assert [parameter['module'] for parameter in result['parameters']] == ['m', 'm']
+    assert all(parameter['location']['file'] == 'parameters.sv' for parameter in result['parameters'])
+
+
 def test_supported_selected_unary_binary_conditional_and_concatenation_expression():
     result = parse_text('''module m(interface C); logic [7:0] a, b; logic select; always
 C.Send(select ? ~a[0] : {a[3:0], b[3:0]} + b[7:0]); endmodule''')

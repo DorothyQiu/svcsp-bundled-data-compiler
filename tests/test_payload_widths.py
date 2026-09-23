@@ -122,11 +122,13 @@ if (c) B.Send(x); endmodule''')
 
 
 def test_symbolic_width_identity_is_preserved_and_mismatch_is_rejected() -> None:
-    _, _, _, _, _, bound = _target('''module m #(parameter int W = 8) (Channel #(W) A, B);
+    behavioral, _, _, _, _, bound = _target('''module m #(parameter int W = 8) (Channel #(W) A, B);
 logic [W-1:0] x; always begin A.Receive(x); B.Send(x); end endmodule''')
     payload = next(port for port in bound.module_ports if port.role == 'payload')
     assert payload.width.symbolic == 'W'
-    assert payload.width.parameters[0].name == 'W'
+    assert payload.width.parameters[0] is behavioral.parameters[0]
+    assert behavioral.variables[0].payload_type.width.parameters[0] is behavioral.parameters[0]
+    assert behavioral.channels[0].payload_type.width.parameters[0] is behavioral.parameters[0]
     with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
         _lower('''module m #(parameter int W = 8, parameter int V = 8) (Channel #(W) C);
 logic [V-1:0] x; always C.Send(x); endmodule''')

@@ -159,7 +159,8 @@ def _location(node: dict) -> SourceLocation | None:
     return SourceLocation(location['file'], location['line'], location['column'])
 
 
-def _payload_type(data: dict | None) -> PayloadType | None:
+def _payload_type(data: dict | None,
+                  parameters: dict[str, Parameter]) -> PayloadType | None:
     if data is None:
         return None
     width = data.get('width', {})
@@ -167,9 +168,19 @@ def _payload_type(data: dict | None) -> PayloadType | None:
     if bits is None and symbolic is None:
         return None
     packed_range = data.get('packed_range')
-    parameters = tuple(Parameter(parameter['name'], parameter['module'], _location(parameter), parameter.get('default'))
-                       for parameter in width.get('parameters', []))
-    return PayloadType(data['base'], PayloadWidth(bits, symbolic, parameters),
+    owned_parameters: list[Parameter] = []
+    if symbolic is not None:
+        for parameter in width.get('parameters', []):
+            name = parameter.get('name')
+            canonical = parameters.get(name)
+            if canonical is None:
+                raise BehavioralIRError(
+                    f'symbolic payload width references undeclared module parameter: {name}'
+                )
+            owned_parameters.append(canonical)
+        if not owned_parameters:
+            raise BehavioralIRError('symbolic payload width has no declared parameter ownership')
+    return PayloadType(data['base'], PayloadWidth(bits, symbolic, tuple(owned_parameters)),
                        (packed_range['left'], packed_range['right']) if packed_range else None)
 
 
@@ -441,24 +452,30 @@ def lower_behavioral(frontend: dict) -> BehavioralModule:
     required = {'module', 'always', 'channels', 'variables'}
     if not required <= frontend.keys():
         raise BehavioralIRError('expected a frontend result')
+    parameters = tuple(Parameter(parameter['name'], parameter['module'], _location(parameter), parameter.get('default'))
+                       for parameter in frontend.get('parameters', []))
+    parameter_map: dict[str, Parameter] = {}
+    for parameter in parameters:
+        if parameter.name in parameter_map:
+            raise BehavioralIRError(f'duplicate module parameter: {parameter.name}')
+        parameter_map[parameter.name] = parameter
     variables = tuple(
-        Variable(variable['name'], tuple(variable['scope']), _location(variable), _payload_type(variable.get('payload_type')))
+        Variable(variable['name'], tuple(variable['scope']), _location(variable),
+                 _payload_type(variable.get('payload_type'), parameter_map))
         for variable in frontend['variables']
     )
     external_inputs = tuple(
-        Variable(item['name'], tuple(item['scope']), _location(item), _payload_type(item.get('payload_type')))
+        Variable(item['name'], tuple(item['scope']), _location(item),
+                 _payload_type(item.get('payload_type'), parameter_map))
         for item in frontend.get('external_inputs', [])
     )
     declarations = {(variable.name, variable.location): variable for variable in variables}
     scope = {variable.name: variable for variable in variables if variable.scope == ('module',)}
     scope.update({item.name: item for item in external_inputs})
     channels = tuple(ChannelEndpoint(channel['name'], location=_location(channel),
-                                     payload_type=_payload_type(channel.get('payload_type')))
+                                     payload_type=_payload_type(channel.get('payload_type'), parameter_map))
                      for channel in frontend['channels'])
     channel_payloads = {channel.name: channel.payload_type for channel in channels}
-    parameters = tuple(Parameter(parameter['name'], parameter['module'], _location(parameter), parameter.get('default'))
-                       for parameter in frontend.get('parameters', []))
-    parameter_map = {parameter.name: parameter for parameter in parameters}
     return BehavioralModule(
         name=frontend['module'],
         body=_statement(frontend['always']['statement'], scope, declarations, channel_payloads, parameter_map),

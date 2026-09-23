@@ -1,7 +1,10 @@
 from dataclasses import fields, is_dataclass
 
+import pytest
+
 from svcsp_compiler import (
-    Assign, Expression, If, Parallel, Receive, Send, Sequence, Skip, lower_behavioral, parse_text,
+    Assign, BehavioralIRError, Expression, If, Parallel, Receive, Send, Sequence, Skip,
+    lower_behavioral, parse_text,
 )
 
 
@@ -75,6 +78,59 @@ if (sel) A.Receive(x); else B.Receive(x); endmodule''')
     assert ir.variables[0].name == 'x'
     assert isinstance(ir.body, If)
     assert ir.body.condition.variable is external
+
+
+def test_source_parameters_are_canonical_across_expressions_and_all_payload_owners():
+    ir = lower('''module m #(parameter int W = 8, parameter int V) (
+input logic [W-1:0] control, Channel #(W) A, Channel #(V) B);
+logic [W-1:0] x;
+logic [V-1:0] y;
+always begin
+  if (W) A.Receive(x);
+  B.Send(y);
+end
+endmodule''', 'parameters.sv')
+
+    width_w, width_v = ir.parameters
+    assert [(parameter.name, parameter.default, parameter.module) for parameter in ir.parameters] == [
+        ('W', '8', 'm'), ('V', None, 'm'),
+    ]
+    assert width_w.location.file == width_v.location.file == 'parameters.sv'
+    assert width_w is not width_v
+
+    assert isinstance(ir.body, Sequence)
+    assert isinstance(ir.body.items[0], If)
+    assert ir.body.items[0].condition.parameter is width_w
+
+    local_x, local_y = ir.variables
+    external_control = ir.external_inputs[0]
+    channel_a, channel_b = ir.channels
+    assert local_x.payload_type.width.parameters[0] is width_w
+    assert external_control.payload_type.width.parameters[0] is width_w
+    assert channel_a.payload_type.width.parameters[0] is width_w
+    assert local_y.payload_type.width.parameters[0] is width_v
+    assert channel_b.payload_type.width.parameters[0] is width_v
+    for owner in (local_x, local_y, external_control, channel_a, channel_b):
+        for parameter in owner.payload_type.width.parameters:
+            assert any(parameter is canonical for canonical in ir.parameters)
+
+
+def test_symbolic_width_with_unowned_parameter_fails_closed():
+    frontend = parse_text("""module m #(parameter int W = 8);
+logic [W-1:0] x;
+always begin end
+endmodule""")
+
+    owner = frontend["variables"][0]["payload_type"]["width"]["parameters"][0]
+    frontend["variables"][0]["payload_type"]["width"]["parameters"] = [
+        {**owner, "name": "V"},
+    ]
+
+    with pytest.raises(
+        BehavioralIRError,
+        match="undeclared module parameter: V",
+    ):
+        lower_behavioral(frontend)
 
 
 def test_conditional_send_remains_inside_if():
