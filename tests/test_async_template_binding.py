@@ -6,6 +6,12 @@ import pytest
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
 from svcsp_compiler.async_template_binding import (
     AsyncTemplateBindingError,
+    BoundBodyAssignWrite,
+    BoundBodyIf,
+    BoundBodyParallel,
+    BoundBodyReceiveWrite,
+    BoundBodySequence,
+    BoundBodySkip,
     BoundAsyncModule,
     bind_async_templates,
 )
@@ -17,6 +23,7 @@ from svcsp_compiler.behavioral_ir import (
     If,
     ONE_BIT,
     Parameter,
+    Parallel,
     PayloadType,
     PayloadWidth,
     Receive,
@@ -882,3 +889,195 @@ def test_conditional_send_has_real_body_and_enable_handshake_lanes() -> None:
     assert _actual_signal(bound, stage_bindings["body_req"]).kind == "request"
     assert _actual_signal(bound, stage_bindings["body_ack"]).kind == "acknowledge"
     assert any(item.formal_name == "ack" for item in _bindings_for(bound, enable_sender))
+
+
+def test_body_program_preserves_ordered_receive_assign_and_send_skip_identities() -> None:
+    program = _Program()
+    receive = program.receive("A", "a")
+    expression = Expression("unary", operator="~", operands=(program.name("a"),))
+    assign = Assign(program.variable("y"), expression)
+    send = program.send("B", program.name("y"))
+    architecture, bound = _bind(program, Sequence((receive, assign, send)))
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    receive_write, assign_write, send_skip = bound.body_program.items
+    assert isinstance(receive_write, BoundBodyReceiveWrite)
+    assert receive_write.source is architecture.input_ports[0].body_receive
+    assert receive_write.source.source.operation is receive
+    assert receive_write.input_port is architecture.input_ports[0]
+    assert receive_write.target is receive.target
+    assert isinstance(assign_write, BoundBodyAssignWrite)
+    assert assign_write.source is architecture.combinational.operations[0]
+    assert assign_write.source.operation is assign
+    assert assign_write.target is assign.target
+    assert assign_write.expression is expression
+    assert isinstance(send_skip, BoundBodySkip)
+    assert send_skip.source is send
+
+
+def test_body_program_preserves_receive_then_same_variable_rewrite() -> None:
+    program = _Program()
+    receive = program.receive("A", "y")
+    expression = Expression("unary", operator="~", operands=(program.name("y"),))
+    assign = Assign(program.variable("y"), expression)
+    _, bound = _bind(program, Sequence((receive, assign, program.send("B", program.name("y")))))
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    receive_write, assign_write, _ = bound.body_program.items
+    assert isinstance(receive_write, BoundBodyReceiveWrite)
+    assert isinstance(assign_write, BoundBodyAssignWrite)
+    assert receive_write.target is assign_write.target is program.variable("y")
+
+
+def test_body_program_preserves_sequential_reassignment_order() -> None:
+    program = _Program()
+    first = Assign(program.variable("y"), program.name("a"))
+    second_expression = Expression("unary", operator="~", operands=(program.name("y"),))
+    second = Assign(program.variable("y"), second_expression)
+    _, bound = _bind(program, Sequence((
+        program.receive("A", "a"), first, second, program.send("B", program.name("y")),
+    )))
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    first_write = bound.body_program.items[1]
+    second_write = bound.body_program.items[2]
+    assert isinstance(first_write, BoundBodyAssignWrite)
+    assert isinstance(second_write, BoundBodyAssignWrite)
+    assert first_write.source.operation is first
+    assert second_write.source.operation is second
+    assert first_write.target is second_write.target is program.variable("y")
+    assert second_write.expression is second_expression
+
+
+def test_body_program_preserves_if_else_nested_sequence_and_exact_condition() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    then_assign = Assign(program.variable("y"), program.name("a"))
+    else_expression = Expression("unary", operator="~", operands=(program.name("a"),))
+    else_assign = Assign(program.variable("y"), else_expression)
+    conditional = If(
+        select,
+        Sequence((Skip(), then_assign)),
+        Sequence((else_assign, Skip())),
+    )
+    _, bound = _bind(program, Sequence((
+        program.receive("A", "a"), conditional, program.send("B", program.name("y")),
+    )))
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    bound_if = bound.body_program.items[1]
+    assert isinstance(bound_if, BoundBodyIf)
+    assert bound_if.condition is select
+    assert isinstance(bound_if.then_branch, BoundBodySequence)
+    assert isinstance(bound_if.else_branch, BoundBodySequence)
+    assert isinstance(bound_if.then_branch.items[0], BoundBodySkip)
+    assert isinstance(bound_if.then_branch.items[1], BoundBodyAssignWrite)
+    assert isinstance(bound_if.else_branch.items[0], BoundBodyAssignWrite)
+    assert isinstance(bound_if.else_branch.items[1], BoundBodySkip)
+    assert bound_if.then_branch.items[1].source.operation is then_assign
+    assert bound_if.else_branch.items[0].source.operation is else_assign
+
+
+def test_body_program_preserves_conditional_receive_and_parallel_branches() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    receive = program.receive("A", "a")
+    first = Assign(program.variable("y"), program.name("a"))
+    second = Assign(program.variable("z"), program.name("a"))
+    body = Sequence((
+        If(select, receive, Skip()),
+        If(select, Parallel((first, second)), Skip()),
+        If(select, program.send("B", program.name("y")), Skip()),
+        If(select, program.send("C", program.name("z")), Skip()),
+    ))
+    architecture, bound = _bind(program, body)
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    receive_if = bound.body_program.items[0]
+    assert isinstance(receive_if, BoundBodyIf)
+    assert receive_if.condition is select
+    assert isinstance(receive_if.then_branch, BoundBodyReceiveWrite)
+    assert receive_if.then_branch.source is architecture.input_ports[0].body_receive
+    parallel_if = bound.body_program.items[1]
+    assert isinstance(parallel_if, BoundBodyIf)
+    assert isinstance(parallel_if.then_branch, BoundBodyParallel)
+    parallel = parallel_if.then_branch
+    assert len(parallel.branches) == 2
+    assert all(isinstance(branch, BoundBodyAssignWrite) for branch in parallel.branches)
+    assert parallel.branches[0].source.operation is first
+    assert parallel.branches[1].source.operation is second
+
+
+@pytest.mark.parametrize("kind", ("receive", "assign"))
+def test_body_program_rejects_malformed_selected_lvalue_targets(kind: str) -> None:
+    program = _Program()
+    if kind == "receive":
+        body = Sequence((program.receive("A", "x"), program.send("B", program.name("x"))))
+    else:
+        body = Sequence((
+            program.receive("A", "a"),
+            Assign(program.variable("x"), program.name("a")),
+            program.send("B", program.name("x")),
+        ))
+    architecture = _architecture(program, body)
+    selected = Expression(
+        "select",
+        variable=program.variable("x"),
+        operands=(
+            Expression(
+                "index",
+                operands=(Expression("literal", value="0"),),
+            ),
+        ),
+    )
+    if kind == "receive":
+        malformed_body = Sequence((
+            Receive(ChannelEndpoint("A", payload_type=_ONE_BIT), selected),
+            program.send("B", program.name("x")),
+        ))
+    else:
+        malformed_body = Sequence((
+            program.receive("A", "a"),
+            Assign(selected, program.name("a")),
+            program.send("B", program.name("x")),
+        ))
+    from dataclasses import replace
+    malformed_transaction = replace(
+        architecture.validated.decomposed.transaction,
+        behavioral=replace(
+            architecture.validated.decomposed.transaction.behavioral,
+            body=malformed_body,
+        ),
+    )
+    malformed_decomposed = replace(
+        architecture.validated.decomposed,
+        transaction=malformed_transaction,
+    )
+    malformed_architecture = replace(
+        architecture,
+        validated=replace(architecture.validated, decomposed=malformed_decomposed),
+    )
+
+    with pytest.raises(AsyncTemplateBindingError, match="R9A does not support selected lvalue targets"):
+        bind_async_templates(malformed_architecture)
+
+
+def test_body_program_is_additive_to_existing_structural_assignments() -> None:
+    program = _Program()
+    assign = Assign(program.variable("y"), program.name("a"))
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"), assign, program.send("B", program.name("y")),
+    )))
+
+    assert any(
+        item.source is architecture.combinational.operations[0]
+        and item.expression is assign.value
+        for item in bound.assignments
+    )
+    received = program.variable("a")
+    received_signal = _variable_signal_id(bound, received)
+    assert any(
+        item.target_signal_id == received_signal
+        and item.source_signal_ids
+        for item in bound.assignments
+    )

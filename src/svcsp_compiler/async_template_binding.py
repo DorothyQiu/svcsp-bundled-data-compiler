@@ -28,6 +28,8 @@ from .async_microarchitecture import (
     RequestJoin,
     StorageSlot,
 )
+from .communication_decomposition import BodyReceive
+from .transaction import RegionOperation
 
 
 class AsyncTemplateBindingError(ValueError):
@@ -125,6 +127,58 @@ class BoundAsyncVariableBinding:
 
 
 @dataclass(frozen=True)
+class BoundBodyReceiveWrite:
+    """One exact BODY Receive occurrence and its whole-Variable write."""
+
+    source: BodyReceive
+    input_port: InputPort
+    target: behavioral.Variable
+
+
+@dataclass(frozen=True)
+class BoundBodyAssignWrite:
+    """One exact source Assign occurrence and its whole-Variable write."""
+
+    source: RegionOperation
+    target: behavioral.Variable
+    expression: behavioral.Expression
+
+
+@dataclass(frozen=True)
+class BoundBodySequence:
+    items: tuple["BoundBodyProcess", ...]
+
+
+@dataclass(frozen=True)
+class BoundBodyIf:
+    condition: behavioral.Expression
+    then_branch: "BoundBodyProcess"
+    else_branch: "BoundBodyProcess"
+
+
+@dataclass(frozen=True)
+class BoundBodyParallel:
+    branches: tuple["BoundBodyProcess", ...]
+
+
+@dataclass(frozen=True)
+class BoundBodySkip:
+    """A source Send or Skip, neither of which writes BODY variables."""
+
+    source: behavioral.Send | behavioral.Skip
+
+
+BoundBodyProcess = (
+    BoundBodyReceiveWrite
+    | BoundBodyAssignWrite
+    | BoundBodySequence
+    | BoundBodyIf
+    | BoundBodyParallel
+    | BoundBodySkip
+)
+
+
+@dataclass(frozen=True)
 class BoundEnableChannel:
     source: EnableChannel
     enable_channel: EnableChannel
@@ -157,6 +211,7 @@ class BoundAsyncModule:
 
     assignments: tuple[BoundAsyncAssignment, ...] = ()
     variable_bindings: tuple[BoundAsyncVariableBinding, ...] = ()
+    body_program: BoundBodyProcess | None = None
 
 
 _IDENTIFIER = re.compile(r"[^A-Za-z0-9_$]")
@@ -206,6 +261,15 @@ def bind_async_templates(
         for operand in expression.operands:
             validate_expression(operand)
 
+    def whole_variable_target(
+        target: behavioral.Variable | behavioral.Expression,
+    ) -> behavioral.Variable:
+        if isinstance(target, behavioral.Variable):
+            return target
+        raise AsyncTemplateBindingError(
+            "R9A does not support selected lvalue targets"
+        )
+
     def validate_process(process: behavioral.Process) -> None:
         if isinstance(process, behavioral.Sequence):
             for item in process.items:
@@ -223,11 +287,13 @@ def bind_async_templates(
         if isinstance(process, behavioral.Assign):
             if isinstance(process.target, behavioral.Expression):
                 validate_expression(process.target)
+            whole_variable_target(process.target)
             validate_expression(process.value)
             return
         if isinstance(process, behavioral.Receive):
             if isinstance(process.target, behavioral.Expression):
                 validate_expression(process.target)
+            whole_variable_target(process.target)
             for selector in process.channel.selectors:
                 validate_expression(selector)
             return
@@ -1153,6 +1219,78 @@ def bind_async_templates(
         for item in instances
     ]
 
+    def one_body_receive(
+        operation: behavioral.Receive,
+        path: tuple[int | str, ...],
+    ) -> tuple[BodyReceive, InputPort]:
+        matches = [
+            (port.body_receive, port)
+            for port in architecture.input_ports
+            if port.body_receive.source.operation is operation
+            and port.body_receive.source.path == path
+        ]
+        if len(matches) != 1:
+            raise AsyncTemplateBindingError(
+                "missing or ambiguous InputPort binding for BODY Receive"
+            )
+        return matches[0]
+
+    def one_combinational_operation(
+        operation: behavioral.Assign,
+        path: tuple[int | str, ...],
+    ) -> RegionOperation:
+        matches = [
+            source
+            for source in architecture.combinational.operations
+            if source.operation is operation and source.path == path
+        ]
+        if len(matches) != 1:
+            raise AsyncTemplateBindingError(
+                "missing or ambiguous combinational RegionOperation binding for Assign"
+            )
+        return matches[0]
+
+    def bind_body_process(
+        process: behavioral.Process,
+        path: tuple[int | str, ...],
+    ) -> BoundBodyProcess:
+        if isinstance(process, behavioral.Sequence):
+            return BoundBodySequence(tuple(
+                bind_body_process(item, path + (index,))
+                for index, item in enumerate(process.items)
+            ))
+        if isinstance(process, behavioral.Parallel):
+            return BoundBodyParallel(tuple(
+                bind_body_process(branch, path + ("parallel", index))
+                for index, branch in enumerate(process.branches)
+            ))
+        if isinstance(process, behavioral.If):
+            return BoundBodyIf(
+                process.condition,
+                bind_body_process(process.then_branch, path + ("then",)),
+                bind_body_process(process.else_branch, path + ("else",)),
+            )
+        if isinstance(process, behavioral.Receive):
+            source, input_port = one_body_receive(process, path)
+            return BoundBodyReceiveWrite(
+                source,
+                input_port,
+                whole_variable_target(process.target),
+            )
+        if isinstance(process, behavioral.Assign):
+            return BoundBodyAssignWrite(
+                one_combinational_operation(process, path),
+                whole_variable_target(process.target),
+                process.value,
+            )
+        if isinstance(process, (behavioral.Send, behavioral.Skip)):
+            return BoundBodySkip(process)
+        raise AsyncTemplateBindingError(
+            f"unsupported BODY process {type(process).__name__}"
+        )
+
+    body_program = bind_body_process(behavioral_module.body, ())
+
     return BoundAsyncModule(
         architecture,
         tuple(updated),
@@ -1172,6 +1310,7 @@ def bind_async_templates(
         tuple(enable_bindings),
         tuple(assignments),
         tuple(variables),
+        body_program,
     )
 
 
