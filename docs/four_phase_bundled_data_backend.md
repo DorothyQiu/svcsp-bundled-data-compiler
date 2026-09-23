@@ -107,6 +107,36 @@ storage_enable = q
 The ordinary controller must be structural: a C-element primitive plus simple
 gates/wires. It must not be implemented as a behavioral FSM.
 
+### Control reset
+
+The ordinary control state has an explicit active-low reset:
+
+```text
+reset_n = 0 -> q = 0
+reset_n = 1 -> normal C-element behavior
+```
+
+A normal four-phase idle state has:
+
+```text
+base_Lreq = 0
+base_Rack = 0
+```
+
+so the C-element inputs are:
+
+```text
+0
+!0 = 1
+```
+
+which is a hold condition. Reset therefore establishes the required initial
+controller state rather than relying on simulation initialization.
+
+Reset applies to control state, not to the payload datapath.
+
+### 1x1 bypass case
+
 For `N = 1`, the input request join is bypassed.
 
 For `M = 1`, the output acknowledgement join is bypassed.
@@ -126,14 +156,11 @@ Ldata -> combinational logic -> latch bank -> Rdata
 
 These bypasses are M6 architecture decisions, not M7 optimizations.
 
-## 3. Join, Fanout, Storage, and Delay
+## 3. Input Request Join
 
-### Input request join
+For `N > 1`, input requests are combined before driving `base_Lreq`.
 
-For `N > 1`, input requests are combined using Muller C-element logic before
-driving `base_Lreq`.
-
-The join must preserve four-phase C-element semantics:
+The join preserves Muller C-element semantics:
 
 ```text
 all requests high -> output high
@@ -141,55 +168,182 @@ all requests low  -> output low
 mixed values      -> retain state
 ```
 
-Its exact C-element network is an RTL-library implementation decision and must
-be validated for the supported handshake assumptions.
+For `N = 2`, the generic RTL library uses one two-input Muller C-element.
 
-### Input acknowledgement fanout
+For `N > 2`, the generic RTL library may use a structural reduction network of
+two-input Muller C-elements under the backend's four-phase monotonicity
+assumption:
 
-`base_Lack` is returned to all participating input Channels.
+```text
+assertion phase:
+    each request transitions only 0 -> 1
+    once high, it remains high until the phase completes
+
+return-to-zero phase:
+    each request transitions only 1 -> 0
+    once low, it remains low until the phase completes
+```
+
+The generic reduction network is not claimed to be a universally safe
+decomposition for arbitrary asynchronous input behavior.
+
+Technology mapping may later replace the generic structure with dedicated
+multi-input C-element cells.
+
+## 4. Input Acknowledge Fanout
+
+`base_Lack` is returned to all participating input Channels:
+
+```text
+base_Lack
+   |
+   +--> Lack[0]
+   +--> Lack[1]
+   ...
+   +--> Lack[N-1]
+```
 
 This is structural wiring or buffering.
 
-### Output request fanout
+For `N = 1`, the connection is direct.
 
-`base_raw_Rreq` is fanned out to all ordinary output branches.
+## 5. Output Request Fanout
 
-Each branch then passes through its own matched delay.
+The base controller produces one raw output request:
 
-### Output acknowledgement join
+```text
+base_raw_Rreq
+```
 
-For `M > 1`, output acknowledgements are combined using Muller C-element logic
-before driving `base_Rack`.
+For `M > 1`, it is structurally fanned out:
 
-### Payload storage
+```text
+                    +--> raw_req[0]
+base_raw_Rreq ------+--> raw_req[1]
+                    ...
+                    +--> raw_req[M-1]
+```
 
-Ordinary BODY storage is a structural level-sensitive latch bank.
+For `M = 1`, the connection is direct.
+
+Each ordinary output branch then passes through its own matched delay.
+
+## 6. Output Acknowledge Join
+
+For `M > 1`, output acknowledgements are combined before driving `base_Rack`.
+
+The join preserves Muller C-element semantics:
+
+```text
+all acknowledgements high -> output high
+all acknowledgements low  -> output low
+mixed values               -> retain state
+```
+
+For `M = 2`, the generic RTL library uses one two-input Muller C-element.
+
+For `M > 2`, the same structural C-element reduction and monotonic four-phase
+assumption used by the input request join applies.
+
+For `M = 1`, the acknowledgement join is bypassed:
+
+```text
+base_Rack = Rack[0]
+```
+
+## 7. Payload Storage
+
+Ordinary BODY payload storage is a structural level-sensitive latch bank.
+
+For each output payload:
+
+```text
+combinational result
+       |
+       v
+structural latch bank
+       |
+       v
+output payload
+```
+
+The latch enable comes directly from the base-controller state:
 
 ```text
 storage_enable = q
 ```
 
-For width `W`, the generic RTL library may instantiate `W` latch primitives.
-The storage block must not invent additional handshake state.
+For payload width `W`, the generic RTL library may instantiate:
 
-### Matched delay
+```text
+W x latch_cell
+```
+
+The storage block must not independently invent handshake state.
+
+Payload latch contents are not required to have a defined power-up value.
+
+Correctness requires the delayed output request to become observable only
+after the corresponding valid payload has propagated through the datapath and
+latch bank, with the required timing margin.
+
+The base controller may launch `base_raw_Rreq` together with
+`storage_enable`; the per-output matched delay enforces the bundled-data timing
+relationship before `Rreq` reaches the external Channel.
+
+Payload latches therefore do not require simulation-only initialization or
+architectural reset.
+
+Technology mapping may replace the generic latch-cell primitive with a
+standard-cell or custom latch implementation.
+
+## 8. Matched Delay
 
 Each ordinary BODY output has one matched-delay requirement:
 
 ```text
-raw_req[i] -> matched_delay[i] -> Rreq[i]
+raw_req[i]
+    |
+    v
+matched_delay[i]
+    |
+    v
+Rreq[i]
 ```
 
-The delay corresponds to the worst-case bundled-data path for that output plus
-the required timing margin.
+The delay must conservatively match the worst-case bundled-data path associated
+with that output plus the required timing margin.
 
-The compiler decides placement and datapath association. Physical realization
-is a technology-binding concern and may later use characterized or
-post-silicon-programmable delay structures.
+Different output branches may require different delays.
+
+The compiler decides:
+
+```text
+delay placement
+associated datapath
+output branch identity
+```
+
+The compiler does not select a final physical inverter count or delay-cell
+implementation.
 
 The current RTL library may use a simulation-oriented delay model.
 
-## 4. Implementation Boundary
+A future technology binding may use:
+
+```text
+characterized delay cells
+programmable delay chains
+coarse/fine delay selection
+slow/fast modes
+post-silicon trim bits
+technology-specific delay macros
+```
+
+Post-silicon delay programmability is a physical implementation concern rather
+than an RTL inference performed by the compiler.
+
+## 9. Implementation Boundary
 
 The target implementation level is:
 
@@ -211,12 +365,15 @@ Matched delay                     technology-binding abstraction
 C-elements and latch cells may remain explicit RTL-library primitive
 boundaries until technology mapping supplies their final implementations.
 
-## 5. EN_RECV and EN_SEND Stages
+Reset is part of the ordinary control implementation and is not part of the
+user payload datapath.
+
+## 10. EN_RECV and EN_SEND Stages
 
 Conditional communication is implemented using separate EN_RECV and EN_SEND
 micropipeline stages, not conditional-split stages.
 
-Each EN stage remains a physical stage with:
+Each EN stage remains a physical micropipeline stage with:
 
 ```text
 controller
@@ -231,10 +388,10 @@ four-phase Channel interfaces
 The controller differs from the ordinary base half-buffer controller because
 it must also consume and interpret an enable token.
 
-For the current backend, the EN_RECV and EN_SEND controllers may remain
-behavioral until their final control circuits are defined.
+For the current backend, EN_RECV and EN_SEND controllers may remain behavioral
+until their final control circuits are defined.
 
-EN_RECV semantics:
+### EN_RECV
 
 ```text
 enable = 1:
@@ -250,7 +407,7 @@ enable = 0:
     launch BODY communication
 ```
 
-EN_SEND semantics:
+### EN_SEND
 
 ```text
 always:
@@ -270,17 +427,17 @@ Detailed enable-token semantics remain defined in
 
 Lecture-style conditional split stages are outside the current backend.
 
-## 6. RTL Library and M6/M7 Contract
+## 11. RTL Library Contract
 
 The RTL library should expose architecture-level components such as:
 
 ```text
-muller_c_element
+muller_c_element2
 four_phase_half_buffer_controller
-request_join
-ack_fanout
-request_fanout
-ack_join
+four_phase_request_join
+four_phase_ack_fanout
+four_phase_request_fanout
+four_phase_ack_join
 latch_cell
 bundled_data_latch_bank
 matched_delay
@@ -288,16 +445,19 @@ en_receive_controller
 en_send_controller
 ```
 
-Exact filenames and primitive decomposition may evolve.
+Exact filenames and primitive decomposition may evolve, but the documented
+architectural roles must remain explicit.
+
+## 12. M6 / M7 Contract
 
 M6 must determine:
 
 ```text
-request join or N=1 bypass
-base half-buffer controller
-input ACK fanout/direct connection
-output request fanout/direct connection
-ACK join or M=1 bypass
+input request join or N=1 direct connection
+one base half-buffer controller
+input ACK fanout or direct connection
+output request fanout or direct connection
+output ACK join or M=1 direct connection
 storage placement
 per-output matched-delay placement
 EN_RECV / EN_SEND placement
@@ -305,4 +465,32 @@ EN_RECV / EN_SEND placement
 
 M7 only binds and emits the M6-selected structure.
 
-M7 must not infer, insert, remove, or reorganize handshake topology.
+M7 must not independently:
+
+```text
+insert or remove joins
+insert or remove fanouts
+change the number of base controllers
+change storage control
+change acknowledgement aggregation
+move matched delays
+replace EN_RECV / EN_SEND architecture
+```
+
+Generated hardware must remain structurally traceable to this backend
+specification.
+
+## 13. Physical-Implementation Boundary
+
+The compiler produces explicit asynchronous microarchitecture, but the
+following remain technology-specific:
+
+```text
+final C-element cell implementation
+final latch-cell implementation
+matched-delay cell realization
+post-silicon delay programming
+physical timing characterization
+```
+
+These belong to later technology mapping and physical-design stages.

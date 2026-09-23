@@ -70,6 +70,161 @@ def test_bundled_data_matched_delay_has_only_control_formals() -> None:
     assert "data_path" not in source
 
 
+def test_ordinary_body_structural_library_components_are_declared() -> None:
+    c_element = _controller_source("muller_c_element2")
+    controller = _controller_source("four_phase_half_buffer_controller")
+    request_join = _controller_source("four_phase_request_join")
+    ack_fanout = _controller_source("four_phase_ack_fanout")
+    request_fanout = _controller_source("four_phase_request_fanout")
+    ack_join = _controller_source("four_phase_ack_join")
+    latch_cell = _library_source("storage", "latch_cell")
+    latch_bank = _library_source("storage", "bundled_data_latch_bank")
+
+    assert "module muller_c_element2" in c_element
+    assert "reset_n" in c_element
+    assert "muller_c_element2 state_element" in controller
+    assert "always" not in controller
+    assert "reset_n" in controller
+    for source, module in ((request_join, "four_phase_request_join"),
+                           (ack_fanout, "four_phase_ack_fanout"),
+                           (request_fanout, "four_phase_request_fanout"),
+                           (ack_join, "four_phase_ack_join")):
+        assert f"module {module}" in source
+    assert "module latch_cell" in latch_cell
+    assert "always" not in latch_cell
+    assert "initial" not in latch_cell
+    assert "module bundled_data_latch_bank" in latch_bank
+    assert "latch_cell bit_latch" in latch_bank
+
+
+def test_ordinary_body_controller_reset_four_phase_behavior_and_latch_bank(tmp_path: Path) -> None:
+    _simulate(tmp_path, "ordinary_body_structural_components", """
+module tb;
+  reg reset_n = 0;
+  reg [1:0] input_req = 2'b00;
+  reg [1:0] output_ack = 2'b00;
+  reg base_Lreq = 1, base_Rack = 0, base_Lack = 0, base_raw_Rreq = 0;
+  reg [3:0] data_in = 4'b0000;
+  reg storage_enable = 0;
+  wire joined_Lreq, joined_Rack, controller_Lack, controller_raw_Rreq, controller_storage_enable;
+  wire [1:0] input_ack, output_raw_Rreq;
+  wire [3:0] data_out;
+
+  four_phase_request_join #(.N(2)) request_join (
+    .reset_n(reset_n), .input_req(input_req), .base_Lreq(joined_Lreq)
+  );
+  four_phase_ack_join #(.M(2)) ack_join (
+    .reset_n(reset_n), .output_ack(output_ack), .base_Rack(joined_Rack)
+  );
+  four_phase_ack_fanout #(.N(2)) ack_fanout (
+    .base_Lack(base_Lack), .input_ack(input_ack)
+  );
+  four_phase_request_fanout #(.M(2)) request_fanout (
+    .base_raw_Rreq(base_raw_Rreq), .output_raw_Rreq(output_raw_Rreq)
+  );
+  four_phase_half_buffer_controller controller (
+    .reset_n(reset_n), .base_Lreq(base_Lreq), .base_Rack(base_Rack),
+    .base_Lack(controller_Lack), .base_raw_Rreq(controller_raw_Rreq),
+    .storage_enable(controller_storage_enable)
+  );
+  bundled_data_latch_bank #(.WIDTH(4)) latch_bank (
+    .data_in(data_in), .storage_enable(storage_enable), .data_out(data_out)
+  );
+
+  initial begin
+    #1; if ({controller_Lack, controller_raw_Rreq, controller_storage_enable} !== 3'b000)
+      $fatal(1, "controller reset");
+    base_Lreq = 1'b0; reset_n = 1'b1;
+    #1; if ({controller_Lack, controller_raw_Rreq, controller_storage_enable} !== 3'b000)
+      $fatal(1, "released reset idle");
+    #1; if (joined_Lreq !== 1'b0 || joined_Rack !== 1'b0) $fatal(1, "initial joins");
+    input_req = 2'b01;
+    #1; if (joined_Lreq !== 1'b0) $fatal(1, "request join changed on mixed input");
+    input_req = 2'b11;
+    #1; if (joined_Lreq !== 1'b1) $fatal(1, "request join missed all-high input");
+    input_req = 2'b01;
+    #1; if (joined_Lreq !== 1'b1) $fatal(1, "request join did not retain high");
+    input_req = 2'b00;
+    #1; if (joined_Lreq !== 1'b0) $fatal(1, "request join missed all-low input");
+    output_ack = 2'b10;
+    #1; if (joined_Rack !== 1'b0) $fatal(1, "ack join changed on mixed input");
+    output_ack = 2'b11;
+    #1; if (joined_Rack !== 1'b1) $fatal(1, "ack join missed all-high input");
+    output_ack = 2'b10;
+    #1; if (joined_Rack !== 1'b1) $fatal(1, "ack join did not retain high");
+    output_ack = 2'b00;
+    #1; if (joined_Rack !== 1'b0) $fatal(1, "ack join missed all-low input");
+    base_Lack = 1'b1; base_raw_Rreq = 1'b1;
+    #1; if (input_ack !== 2'b11 || output_raw_Rreq !== 2'b11) $fatal(1, "fanout wiring");
+    base_Lreq = 1'b1;
+    #1; if ({controller_Lack, controller_raw_Rreq, controller_storage_enable} !== 3'b111)
+      $fatal(1, "controller launch");
+    base_Rack = 1'b1;
+    #1; if ({controller_Lack, controller_raw_Rreq, controller_storage_enable} !== 3'b111)
+      $fatal(1, "controller hold");
+    base_Lreq = 1'b0;
+    #1; if ({controller_Lack, controller_raw_Rreq, controller_storage_enable} !== 3'b000)
+      $fatal(1, "controller reset");
+    storage_enable = 1'b1; data_in = 4'ha;
+    #1; if (data_out !== 4'ha) $fatal(1, "latch bank capture");
+    storage_enable = 1'b0; data_in = 4'h5;
+    #1; if (data_out !== 4'ha) $fatal(1, "latch bank retention");
+    $finish;
+  end
+endmodule
+""")
+
+
+def test_ordinary_body_three_way_request_and_ack_joins_are_monotonic_c_element_reductions(
+    tmp_path: Path,
+) -> None:
+    _simulate(tmp_path, "ordinary_body_three_way_joins", """
+module tb;
+  reg reset_n = 0;
+  reg [2:0] input_req = 3'b000;
+  reg [2:0] output_ack = 3'b000;
+  wire base_Lreq, base_Rack;
+
+  four_phase_request_join #(.N(3)) request_join (
+    .reset_n(reset_n), .input_req(input_req), .base_Lreq(base_Lreq)
+  );
+  four_phase_ack_join #(.M(3)) ack_join (
+    .reset_n(reset_n), .output_ack(output_ack), .base_Rack(base_Rack)
+  );
+
+  initial begin
+    #1; if ({base_Lreq, base_Rack} !== 2'b00) $fatal(1, "join reset");
+    reset_n = 1'b1;
+    input_req[2] = 1'b1;
+    #1; if (base_Lreq !== 1'b0) $fatal(1, "request first arrival");
+    input_req[0] = 1'b1;
+    #1; if (base_Lreq !== 1'b0) $fatal(1, "request second arrival");
+    input_req[1] = 1'b1;
+    #1; if (base_Lreq !== 1'b1) $fatal(1, "request all high");
+    input_req[0] = 1'b0;
+    #1; if (base_Lreq !== 1'b1) $fatal(1, "request first return holds");
+    input_req[2] = 1'b0;
+    #1; if (base_Lreq !== 1'b1) $fatal(1, "request second return holds");
+    input_req[1] = 1'b0;
+    #1; if (base_Lreq !== 1'b0) $fatal(1, "request all low");
+    output_ack[1] = 1'b1;
+    #1; if (base_Rack !== 1'b0) $fatal(1, "ack first arrival");
+    output_ack[2] = 1'b1;
+    #1; if (base_Rack !== 1'b0) $fatal(1, "ack second arrival");
+    output_ack[0] = 1'b1;
+    #1; if (base_Rack !== 1'b1) $fatal(1, "ack all high");
+    output_ack[2] = 1'b0;
+    #1; if (base_Rack !== 1'b1) $fatal(1, "ack first return holds");
+    output_ack[0] = 1'b0;
+    #1; if (base_Rack !== 1'b1) $fatal(1, "ack second return holds");
+    output_ack[1] = 1'b0;
+    #1; if (base_Rack !== 1'b0) $fatal(1, "ack all low");
+    $finish;
+  end
+endmodule
+""")
+
+
 def test_four_phase_enable_sender_declares_the_channel_sender_contract() -> None:
     source = _controller_source("four_phase_enable_sender")
 
