@@ -148,6 +148,13 @@ from svcsp_compiler import compile_async_file
 rtl = compile_async_file("design.sv")
 ```
 
+Regenerate the checked-in receive/invert/send demo RTL with:
+
+```bash
+source .venv/bin/activate
+python -c "from pathlib import Path; from svcsp_compiler import compile_async_file; Path('examples/generated/receive_invert_send_async.sv').write_text(compile_async_file('examples/receive_invert_send.sv'))"
+```
+
 ## Validation
 
 Unsupported source must fail explicitly rather than be silently reinterpreted.
