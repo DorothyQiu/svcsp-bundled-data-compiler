@@ -172,10 +172,14 @@ M6 decides all architecture required by the RTL backend, including:
 
 ```text
 ordinary BODY handshake topology
-controller structure
-storage
-matched-delay requirements
+ordinary controller structure
+ordinary BODY storage
+ordinary matched-delay requirements
+
+Enable Channel realization and availability
 EN_RECV / EN_SEND placement
+EN-stage payload storage
+EN-stage matched-delay requirements
 ```
 
 For the current backend, use
@@ -203,6 +207,7 @@ payload widths
 signal connections
 deterministic names
 expression rendering
+exact M6-resource-to-RTL-instance traceability
 ```
 
 M7 must not invent:
@@ -210,9 +215,12 @@ M7 must not invent:
 ```text
 handshake topology
 communication ordering
+controller structure
 storage placement
 arbitration
 matched-delay placement
+Enable Channel realization or availability
+EN_RECV / EN_SEND placement or physical resources
 ```
 
 Output:

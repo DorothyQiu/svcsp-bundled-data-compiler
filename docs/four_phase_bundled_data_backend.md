@@ -391,6 +391,29 @@ it must also consume and interpret an enable token.
 For the current backend, EN_RECV and EN_SEND controllers may remain behavioral
 until their final control circuits are defined.
 
+### Enable Channel availability
+
+Each M4 logical Enable is realized by this backend as a one-bit four-phase
+bundled-data Channel carrying exactly one enable token per source transaction.
+
+Enable availability is an M6 scheduling decision:
+
+```text
+EN_RECV:
+    PRE_INPUT
+    enable is available before BODY input acquisition
+    enable generation must not wait for the BODY input controlled by that EN_RECV
+
+EN_SEND:
+    POST_INPUT
+    enable is available after BODY input acquisition
+    the enable communication participates in transaction completion
+```
+
+`PRE_INPUT` and `POST_INPUT` describe when the enable token becomes available
+relative to BODY input acquisition. They do not define additional source-level
+communication ordering.
+
 ### EN_RECV
 
 ```text
@@ -438,13 +461,17 @@ four_phase_request_join
 four_phase_ack_fanout
 four_phase_request_fanout
 four_phase_ack_join
+four_phase_enable_sender
 latch_cell
 bundled_data_latch_bank
-matched_delay
+bundled_data_matched_delay
 en_receive_controller
 en_send_controller
 ```
 
+Architecture-level components may internally use lower-level generic or
+simulation-oriented primitives. For example, bundled_data_matched_delay may
+wrap a lower-level matched_delay primitive.
 Exact filenames and primitive decomposition may evolve, but the documented
 architectural roles must remain explicit.
 
@@ -458,9 +485,14 @@ one base half-buffer controller
 input ACK fanout or direct connection
 output request fanout or direct connection
 output ACK join or M=1 direct connection
-storage placement
-per-output matched-delay placement
+
+ordinary BODY storage placement
+per-ordinary-output matched-delay placement
+
+Enable Channel realization and availability
 EN_RECV / EN_SEND placement
+per-EN-stage payload-storage placement
+per-EN-stage outgoing matched-delay placement
 ```
 
 M7 only binds and emits the M6-selected structure.
@@ -471,10 +503,13 @@ M7 must not independently:
 insert or remove joins
 insert or remove fanouts
 change the number of base controllers
-change storage control
+change ordinary storage control
 change acknowledgement aggregation
-move matched delays
+move ordinary matched delays
+change Enable Channel availability
 replace EN_RECV / EN_SEND architecture
+insert, remove, or move EN-stage storage
+insert, remove, or move EN-stage matched delays
 ```
 
 Generated hardware must remain structurally traceable to this backend

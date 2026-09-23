@@ -92,10 +92,11 @@ conditional Send
 input alternatives
 output alternatives
 nested conditions
-exact source/endpoint/payload/enable identity
+effective enable-condition composition
+conditional Receive validity-predicate recording
+BODY-side communication remains unconditional
+exact source/endpoint/payload/enable/BODY/EN-stage identity
 ```
-
-BODY communication remains unconditional.
 
 Detailed expected semantics are defined in
 `communication_decomposition.md`.
@@ -125,49 +126,49 @@ other non-independent communication
 
 Use `four_phase_bundled_data_backend.md` as the expected architecture.
 
-Verify at minimum:
+For `1R1S`, `2R1S`, `1R2S`, and `2R2S`, verify that all ordinary BODY
+topology decisions match the backend specification:
 
 ```text
-1R1S:
-    request join bypass
-    one base half-buffer controller
-    ACK join bypass
-
-2R1S:
-    input request join
-    one base half-buffer controller
-    output ACK direct
-
-1R2S:
-    input request direct
-    one base half-buffer controller
-    output request fanout
-    output ACK join
-
-2R2S:
-    input request join
-    one base half-buffer controller
-    output request fanout
-    output ACK join
+input request join or direct connection
+input ACK fanout or direct connection
+output request fanout or direct connection
+output ACK join or direct connection
+exactly one base half-buffer controller
 ```
+Also include representative `N > 2` and `M > 2` cases to verify that M6
+selects the same generic request-join, fanout, and acknowledgement-join
+architecture without introducing a different topology.
 
 Also verify:
 
 ```text
-structural storage placement
+ordinary structural storage placement
 one matched-delay requirement per ordinary BODY output
-EN_RECV placement
-EN_SEND placement
-enable Channel availability and identity
+
+one Enable Channel per decomposed conditional communication
+Enable Channel identity
+EN_RECV PRE_INPUT availability
+EN_RECV enable launch does not depend on its controlled BODY input
+EN_SEND POST_INPUT availability
+EN_SEND Enable Channel participates in transaction completion
+
+EN_RECV / EN_SEND placement
+one structural payload-storage resource per EN stage
+one outgoing matched-delay requirement per EN stage
+exact stage/storage/delay/port identity
 ```
 
 M6 is complete when M7 requires no new architecture decisions.
 
 ## M7. Structural RTL Backend
 
+### M7A. Structural Binding and Emission
+
 Verify:
 
 ```text
+exact M6 resource -> RTL instance traceability
 component instances
 ports and parameters
 payload widths
@@ -175,11 +176,47 @@ signal connectivity
 request/acknowledge directions
 storage connectivity
 matched-delay connectivity
+Enable Channel sender connectivity
 EN_RECV / EN_SEND connectivity
-deterministic RTL output
+expression rendering
+deterministic names and RTL output
 ```
 
-Generated-RTL simulation coverage should include:
+Verify that M7 does not independently change:
+
+```text
+handshake topology
+storage placement
+matched-delay placement
+Enable Channel availability
+EN_RECV / EN_SEND physical resources
+```
+
+### M7B. RTL Library Components
+
+Verify:
+
+```text
+structural Muller C-element behavior
+ordinary half-buffer controller behavior
+ordinary control reset
+input request join
+input ACK fanout
+output request fanout
+output ACK join
+N > 2 / M > 2 monotonic C-element reduction behavior
+structural latch-bank transparency and retention
+no architectural payload-reset requirement
+matched-delay control behavior
+Enable Channel sender behavior
+EN_RECV controller behavior
+EN_SEND controller behavior
+EN-stage payload retention
+```
+
+### M7C. Generated-RTL Simulation
+
+Simulation coverage should include:
 
 ```text
 1R1S
@@ -194,27 +231,41 @@ combined conditional communication
 nested conditional communication
 ```
 
-Verify:
+For each applicable scenario, verify:
 
 ```text
 functional result
-four-phase completion
-payload stability
-input independence
-output independence
-conditional communication behavior
-multi-transaction re-arming
+four-phase completion and return to idle
+payload stability during active communication
+
+multi-input correctness under different input-request arrival orders
+multi-output correctness under different output-ACK arrival orders
+
+enabled conditional external communication occurs
+disabled conditional external communication remains untouched or suppressed
+
+multi-transaction re-arming with changed payloads
+conditional re-arming with changed enable values
 ```
 
 ## Permanent Negative Regression
 
-Keep rejection tests for:
+Rejection behavior defined by `supported_architectures.md` and by the owning
+compiler stage must remain permanently covered.
+
+Keep focused rejection tests at the stage that owns each rule.
+
+At minimum preserve coverage for:
 
 ```text
-Receive -> Send -> Receive
+interleaved / multi-stage communication
 Receive after computation begins
 repeated endpoint communication
-dependent Receive
-invalid conditional data use
+dependent communication
+invalid conditional receive data use
 other unsupported communication ordering
 ```
+
+Also keep a small public-entrypoint rejection smoke set through
+`compile_async_file()` so that stage-local validation cannot disappear from
+the integrated compiler flow.
