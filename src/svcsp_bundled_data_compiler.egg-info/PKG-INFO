@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: svcsp-bundled-data-compiler
-Version: 0.0.0
-Summary: Compiler for bundled SVCSP data
-Requires-Python: >=3.10
-Provides-Extra: test
-Requires-Dist: pytest>=7; extra == "test"

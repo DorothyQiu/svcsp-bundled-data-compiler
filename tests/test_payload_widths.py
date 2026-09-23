@@ -1,178 +1,139 @@
-from dataclasses import replace
-
+"""Payload-width coverage for the authoritative M1--M7 flow."""
 import pytest
 
-from svcsp_compiler import (
-    ONE_BIT, BehavioralIRError, ChannelEndpoint, PayloadType, PayloadWidth, TemplateBindingError, analyze_dependencies,
-    bind_templates, lower_behavioral, normalize_communication, parse_text,
-    select_microarchitecture, synthesize_pipeline,
-)
+from svcsp_compiler.async_microarchitecture import lower_microarchitecture
+from svcsp_compiler.async_rtl_codegen import emit_async_systemverilog
+from svcsp_compiler.async_template_binding import AsyncTemplateBindingError, bind_async_templates
+from svcsp_compiler.behavioral_ir import BehavioralIRError, PayloadWidth, lower_behavioral
+from svcsp_compiler.communication_decomposition import decompose_transaction
+from svcsp_compiler.frontend import parse_text
+from svcsp_compiler.semantic_analysis import analyze_semantics
+from svcsp_compiler.transaction import extract_transaction
 
 
-def lower(source):
+def _lower(source: str):
     return lower_behavioral(parse_text(source, 'widths.sv'))
 
 
-def bound(source):
-    behavioral = lower(source)
-    normalized = normalize_communication(behavioral)
-    dependencies = analyze_dependencies(normalized)
-    pipeline = synthesize_pipeline(dependencies)
-    microarchitecture = select_microarchitecture(pipeline)
-    return behavioral, normalized, dependencies, pipeline, microarchitecture, bind_templates(microarchitecture)
+def _target(source: str):
+    behavioral = _lower(source)
+    transaction = extract_transaction(behavioral)
+    decomposed = decompose_transaction(transaction)
+    validated = analyze_semantics(decomposed)
+    architecture = lower_microarchitecture(validated)
+    bound = bind_async_templates(architecture)
+    return behavioral, transaction, decomposed, validated, architecture, bound
 
 
-def payload_signals(graph):
-    return [signal for signal in graph.signals if signal.semantic_kind.value == 'payload']
-
-
-def test_frontend_preserves_scalar_concrete_and_symbolic_declared_widths():
+def test_frontend_preserves_scalar_concrete_and_symbolic_declared_widths() -> None:
     scalar = parse_text('module m; logic x; reg y; bit z; always begin end endmodule')['variables']
     concrete = parse_text('module m; logic [7:0] x; always begin end endmodule')['variables'][0]['payload_type']
     symbolic = parse_text('''module m #(parameter int W = 8); logic [W-1:0] x;
 always begin end endmodule''')['variables'][0]['payload_type']
     assert [variable['payload_type']['width']['bits'] for variable in scalar] == [1, 1, 1]
     assert concrete['width']['bits'] == 8
-    assert symbolic['width']['bits'] is None
-    assert symbolic['width']['symbolic'] == 'W'
+    assert symbolic['width']['bits'] is None and symbolic['width']['symbolic'] == 'W'
 
 
-def test_channel_width_parameter_is_preserved_when_declared():
+def test_channel_width_parameter_survives_frontend_and_behavioral_lowering() -> None:
     frontend = parse_text('''module m #(parameter int W = 8) (Channel #(W) C); logic [W-1:0] x;
 always C.Send(x); endmodule''')
+    behavioral = lower_behavioral(frontend)
     assert frontend['channels'][0]['payload_type']['width']['symbolic'] == 'W'
-    assert lower_behavioral(frontend).body.channel.payload_type.width.symbolic == 'W'
+    assert behavioral.body.channel.payload_type.width.symbolic == 'W'
 
 
-def test_widths_survive_all_existing_ir_passes():
-    behavioral, normalized, dependencies, pipeline, microarchitecture, graph = bound('''module m(interface A, B); logic [7:0] x, y, increment; always begin
-A.Receive(x); y = x + increment; B.Send(y); end endmodule''')
+def test_eight_bit_width_survives_m3_through_m7() -> None:
+    behavioral, transaction, decomposed, validated, architecture, bound = _target('''
+module m(Channel #(8) A, B); logic [7:0] x, y, increment; always begin
+  A.Receive(x); y = x + increment; B.Send(y);
+end endmodule''')
     assert behavioral.variables[0].payload_type.width.bits == 8
-    assert normalized.variables[1].payload_type.width.bits == 8
-    receive = next(node for node in dependencies.nodes if node.label == 'receive')
-    assert receive.variable.payload_type.width.bits == 8
-    receive_stage = next(stage for stage in pipeline.stages if stage.operations[0].label == 'receive')
-    assert [node.label for node in receive_stage.operations] == ['receive', 'assign', 'send']
-    assert receive_stage.variable.payload_type.width.bits == 8
-    body_stage = next(stage for stage in microarchitecture.stages if stage.body_operations[0].label == 'receive')
-    assert body_stage.endpoint.payload_type.width.bits == 8
-    assert all(signal.width.bits == 8 for signal in payload_signals(graph))
+    assert transaction.receives[0].operation.target.payload_type.width.bits == 8
+    assert decomposed.body_receives[0].source.operation.target.payload_type.width.bits == 8
+    assert validated.decomposed is decomposed
+    assert architecture.storage.slots[0].body_send.source.operation.channel.payload_type.width.bits == 8
+    assert all(port.width.bits == 8 for port in bound.module_ports if port.role == 'payload')
+    assert 'logic [7:0] body_var_0_x;' in emit_async_systemverilog(bound)
 
 
-def test_storage_payload_width_is_bound_from_its_stage_context():
-    _, _, _, _, _, graph = bound('module m; logic [7:0] x, increment; always x = x + increment; endmodule')
-    stage = next(stage for stage in graph.body_stages if stage.operations[0].label == 'assign')
-    signal_map = {signal.id: signal for signal in graph.signals}
-    storage_data = graph.bindings_for(stage.storage.id, 'data_in')[0]
-    assert signal_map[storage_data.signal_id].width.bits == 8
+def test_conditional_receive_and_send_bind_eight_bit_m7_stages() -> None:
+    _, _, _, _, architecture, bound = _target('''
+module m(Channel #(8) A, B); logic c; logic [7:0] x, y; always begin
+  if (c) A.Receive(x); B.Send(y);
+end endmodule''')
+    stage = architecture.en_receive_stages[0]
+    instance = next(item for item in bound.instances if item.source is stage)
+    assert next(item.value for item in bound.parameter_bindings
+                if item.instance_id == instance.id and item.formal_name == 'WIDTH').bits == 8
+
+    _, _, _, _, architecture, bound = _target('''
+module m(Channel #(8) A, B); logic c; logic [7:0] x; always begin
+  A.Receive(x); if (c) B.Send(x);
+end endmodule''')
+    stage = architecture.en_send_stages[0]
+    instance = next(item for item in bound.instances if item.source is stage)
+    assert next(item.value for item in bound.parameter_bindings
+                if item.instance_id == instance.id and item.formal_name == 'WIDTH').bits == 8
 
 
-def test_conditional_receive_wrapper_payload_width_is_bound():
-    _, _, _, _, _, graph = bound('''module m(interface C); logic c; logic [7:0] x; always
-if (c) C.Receive(x); endmodule''')
-    wrapper = graph.wrappers[0]
-    signal_map = {signal.id: signal for signal in graph.signals}
-    assert signal_map[graph.bindings_for(wrapper.id, 'external_data')[0].signal_id].width.bits == 8
-    assert signal_map[graph.bindings_for(wrapper.id, 'body_data')[0].signal_id].width.bits == 8
+def test_handshake_and_enable_signals_remain_one_bit() -> None:
+    _, _, _, _, architecture, bound = _target('''
+module m(Channel #(8) A, B); logic c; logic [7:0] x; always begin
+  A.Receive(x); if (c) B.Send(x);
+end endmodule''')
+    assert all(channel.width.bits == 1 for channel in architecture.enable_channels)
+    assert all(signal.width.bits == 1 for signal in bound.signals
+               if signal.kind in {'request', 'acknowledge', 'completion', 'control'} and
+               signal.id not in {'input_join_req', 'input_join_ack', 'output_fork_launch',
+                                 'output_fork_complete', 'stage_output_complete'})
 
 
-def test_conditional_send_wrapper_payload_width_is_bound():
-    _, _, _, _, _, graph = bound('''module m(interface C); logic c; logic [7:0] x, y; always
-if (c) C.Send(x + y); endmodule''')
-    wrapper = graph.wrappers[0]
-    signal_map = {signal.id: signal for signal in graph.signals}
-    assert signal_map[graph.bindings_for(wrapper.id, 'body_data')[0].signal_id].width.bits == 8
-    assert signal_map[graph.bindings_for(wrapper.id, 'external_data')[0].signal_id].width.bits == 8
+def test_selected_endpoints_and_shadowed_variables_preserve_identity_and_width() -> None:
+    behavioral, _, _, _, _, bound = _target('''
+module m(Channel #(4) A[2], B); logic c; logic [3:0] x; always begin
+  B.Receive(x); if (c) A[0].Send(x); if (c) A[1].Send(x);
+end endmodule''')
+    first, second = behavioral.body.items[1].then_branch.channel, behavioral.body.items[2].then_branch.channel
+    assert first != second and first.payload_type.width.bits == second.payload_type.width.bits == 4
+    assert {port.endpoint for port in bound.module_ports if port.flow == 'send'} == {first, second}
 
-
-def test_handshake_and_enable_signals_are_one_bit():
-    _, _, _, _, _, graph = bound('''module m(interface C); logic c, x; always
-if (c) C.Send(x); endmodule''')
-    assert all(signal.width == ONE_BIT for signal in graph.signals if signal.semantic_kind.value != 'payload')
-
-
-def test_selected_endpoints_preserve_width_and_identity():
-    behavioral, _, _, _, _, graph = bound('''module m(interface A[2]); logic c; logic [3:0] x; always begin
-if (c) A[0].Send(x); if (c) A[1].Send(x); end endmodule''')
-    first, second = behavioral.body.items[0].then_branch.channel, behavioral.body.items[1].then_branch.channel
-    assert first != second
-    assert first.payload_type.width.bits == second.payload_type.width.bits == 4
-    assert {wrapper.endpoint.selectors[0].operands[0].value for wrapper in graph.wrappers} == {'0', '1'}
-
-
-def test_shadowed_variable_widths_remain_distinct():
-    behavioral = lower('''module m(interface A, B); logic [7:0] x; always begin
+    shadowed = _lower('''module m(interface A, B); logic [7:0] x; always begin
 begin logic [3:0] x; A.Receive(x); end B.Send(x); end endmodule''')
-    inner, outer = behavioral.body.items[0].items[0].target, behavioral.body.items[1].value.variable
-    assert inner != outer
-    assert inner.payload_type.width.bits == 4
-    assert outer.payload_type.width.bits == 8
+    inner, outer = shadowed.body.items[0].items[0].target, shadowed.body.items[1].value.variable
+    assert inner is not outer
+    assert (inner.payload_type.width.bits, outer.payload_type.width.bits) == (4, 8)
 
 
-def test_unknown_required_payload_width_fails_closed_at_template_binding():
-    behavioral = lower('module m(interface C); always C.Send(5); endmodule')
-    microarchitecture = select_microarchitecture(
-        synthesize_pipeline(analyze_dependencies(normalize_communication(behavioral)))
-    )
-    with pytest.raises(TemplateBindingError, match='cannot establish payload width'):
-        bind_templates(microarchitecture)
+def test_unknown_and_incompatible_payload_widths_fail_closed_without_conversion() -> None:
+    behavioral = _lower('''module m(interface A, B); logic x; always begin
+  A.Receive(x); B.Send(5);
+end endmodule''')
+    validated = analyze_semantics(decompose_transaction(extract_transaction(behavioral)))
+    with pytest.raises(AsyncTemplateBindingError, match='Send has no payload width'):
+        bind_async_templates(lower_microarchitecture(validated))
+    with pytest.raises(BehavioralIRError, match='incompatible payload widths for Receive'):
+        _lower('module m(Channel #(8) C); logic [15:0] x; always C.Receive(x); endmodule')
+    with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
+        _lower('module m(Channel #(16) C); logic [7:0] x; always C.Send(x); endmodule')
+    with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
+        _lower('''module m(Channel #(8) B); logic c; logic [15:0] x; always
+if (c) B.Send(x); endmodule''')
 
 
-def test_equal_concrete_channel_and_variable_widths_are_accepted():
-    _, _, _, _, _, graph = bound('''module m(Channel #(8) C); logic [7:0] x; always
-C.Receive(x); endmodule''')
-    assert payload_signals(graph)[0].width.bits == 8
-
-
-@pytest.mark.parametrize('source, operation', [
-    ('module m(Channel #(8) C); logic [15:0] x; always C.Receive(x); endmodule', 'Receive'),
-    ('module m(Channel #(16) C); logic [7:0] x; always C.Send(x); endmodule', 'Send'),
-])
-def test_incompatible_concrete_payload_widths_are_rejected(source, operation):
-    with pytest.raises(BehavioralIRError, match=f'incompatible payload widths for {operation}'):
-        lower(source)
-
-
-def test_same_parameter_owned_symbolic_widths_are_accepted_and_preserved():
-    _, _, _, _, _, graph = bound('''module m #(parameter int W = 8) (Channel #(W) C); logic [W-1:0] x; always
-C.Send(x); endmodule''')
-    payload = next(signal for signal in payload_signals(graph) if signal.endpoint is not None)
+def test_symbolic_width_identity_is_preserved_and_mismatch_is_rejected() -> None:
+    _, _, _, _, _, bound = _target('''module m #(parameter int W = 8) (Channel #(W) A, B);
+logic [W-1:0] x; always begin A.Receive(x); B.Send(x); end endmodule''')
+    payload = next(port for port in bound.module_ports if port.role == 'payload')
     assert payload.width.symbolic == 'W'
     assert payload.width.parameters[0].name == 'W'
-    assert payload.width.parameters[0].module == 'm'
-
-
-def test_different_symbolic_parameter_identities_are_rejected():
-    source = '''module m #(parameter int W = 8, parameter int V = 8) (Channel #(W) C); logic [V-1:0] x; always
-C.Send(x); endmodule'''
     with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
-        lower(source)
-
-
-def test_undeclared_symbolic_width_parameter_is_rejected():
+        _lower('''module m #(parameter int W = 8, parameter int V = 8) (Channel #(W) C);
+logic [V-1:0] x; always C.Send(x); endmodule''')
     with pytest.raises(Exception, match='undeclared symbolic width parameter: W'):
         parse_text('module m; logic [W-1:0] x; always begin end endmodule')
 
 
-def test_incomplete_payload_width_object_is_rejected():
+def test_payload_width_object_requires_exactly_one_representation() -> None:
     with pytest.raises(ValueError, match='payload width requires exactly one'):
         PayloadWidth()
-
-
-def test_conditional_wrapper_payload_width_mismatch_is_rejected_without_conversion():
-    source = '''module m(Channel #(8) C); logic c; logic [15:0] x; always
-if (c) C.Send(x); endmodule'''
-    with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
-        lower(source)
-
-
-def test_storage_payload_width_mismatch_is_rejected_without_conversion():
-    behavioral = lower('module m; logic [7:0] x, increment; always x = x + increment; endmodule')
-    microarchitecture = select_microarchitecture(
-        synthesize_pipeline(analyze_dependencies(normalize_communication(behavioral)))
-    )
-    wrong_endpoint = ChannelEndpoint('synthetic', payload_type=PayloadType('logic', PayloadWidth(bits=16)))
-    malformed_stage = replace(microarchitecture.stages[0], endpoint=wrong_endpoint)
-    malformed = replace(microarchitecture, stages=(malformed_stage,))
-    with pytest.raises(TemplateBindingError, match='incompatible payload widths for payload connection'):
-        bind_templates(malformed)

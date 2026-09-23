@@ -53,14 +53,6 @@ Reject communication that is not semantically independent.
 
 This flow is authoritative.
 
-Existing code may contain legacy phase numbering, `PipelineGraph`,
-`synthesize_pipeline()`, wrapper terminology, or other structures from the
-previous design.
-
-Treat these as migration targets, not architectural requirements.
-
-Do not change the target specification merely to match legacy code.
-
 # Conditional Communication
 
 Source level:

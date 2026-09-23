@@ -138,7 +138,7 @@ def _flatten_channel_svcsp_for_icarus(source: str) -> str:
 
     # Child interface ports establish the parent external-port roles and the
     # widths of parent/internal actual channels.  Iterate to a fixed point so
-    # the decomposed top learns its interface contract from BODY and wrapper.
+    # the decomposed top learns its interface contract from BODY and EN stages.
     changed = True
     while changed:
         changed = False
@@ -683,4 +683,3 @@ endmodule
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
     assert ('PASS conditional Receive equivalence: original=11,0,33,0 '
             'decomposed=11,0,33,0 disabled_L_ack=0') in run_result.stdout
-

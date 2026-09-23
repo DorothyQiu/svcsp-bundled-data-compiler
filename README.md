@@ -136,6 +136,18 @@ Gate-Level Asynchronous Implementation
 The compiler architecture is not restricted to bundled-data or four-phase
 handshaking; those are the first backend targets.
 
+## Compile an SVCSP File
+
+`compile_async_file()` is the supported SVCSP-file to asynchronous-RTL
+entrypoint. It runs the authoritative frontend through M7 flow and returns
+structural SystemVerilog:
+
+```python
+from svcsp_compiler import compile_async_file
+
+rtl = compile_async_file("design.sv")
+```
+
 ## Validation
 
 Unsupported source must fail explicitly rather than be silently reinterpreted.

@@ -115,8 +115,6 @@ def test_1r1s_binds_the_exact_m6_join_storage_and_fork_topology() -> None:
     assert _bound_for(bound, architecture.input_join).template == "four_phase_input_join"
     assert _bound_for(bound, architecture.storage.slots[0]).template == "bundled_data_storage"
     assert _bound_for(bound, architecture.output_fork).template == "four_phase_output_fork"
-    assert not hasattr(bound, "pipeline")
-    assert not hasattr(bound, "normalized")
 
 
 def test_2r1s_binds_one_join_with_both_inputs_and_no_source_order_link() -> None:
@@ -211,8 +209,7 @@ def test_conditional_receive_binds_only_the_en_receive_microstage_to_external_an
     assert bindings["enable_req"].actual_signal_id == channel_binding.request_signal_id
     assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
     assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
-    assert not any(item.source is stage.input_port and item.template == "four_phase_receive_port"
-                   for item in bound.instances)
+    assert not any(item.source is stage.input_port for item in bound.instances)
     assert bindings["body_req"].actual_signal_id in {
         item.actual_signal_id for item in _bindings_for(bound, _bound_for(bound, architecture.input_join))
     }
@@ -235,8 +232,7 @@ def test_conditional_send_binds_only_the_en_send_microstage_to_external_and_body
     assert bindings["enable_req"].actual_signal_id == channel_binding.request_signal_id
     assert bindings["enable_ack"].actual_signal_id == channel_binding.acknowledge_signal_id
     assert bindings["enable_data"].actual_signal_id == channel_binding.data_signal_id
-    assert not any(item.source is stage.output_port and item.template == "four_phase_send_port"
-                   for item in bound.instances)
+    assert not any(item.source is stage.output_port for item in bound.instances)
 
 
 def test_selected_endpoints_and_payload_widths_are_bound_without_reinterpretation() -> None:
@@ -329,8 +325,7 @@ def test_conditional_en_receive_uses_the_m6_microstage_and_enable_channel_bindin
     assert _actual_signal(bound, bindings["body_ack"]).kind == "acknowledge"
     assert _actual_signal(bound, bindings["body_data"]).kind == "payload"
     assert _actual_signal(bound, bindings["enable_data"]).kind == "payload"
-    assert not any(item.source is stage.input_port and item.template == "four_phase_receive_port"
-                   for item in bound.instances)
+    assert not any(item.source is stage.input_port for item in bound.instances)
 
 
 def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:

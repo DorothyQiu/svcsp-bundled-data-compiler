@@ -1,63 +1,56 @@
-"""SVCSP compiler frontend and Behavioral CSP IR."""
+"""Target SVCSP-to-bundled-data asynchronous RTL compiler APIs."""
 
-from .frontend import FrontendError, parse_file, parse_text
+from .async_compiler import compile_async_file
+from .async_microarchitecture import (
+    AsyncMicroarchitecture, BufferStyle, CombinationalBlock, EnableAvailability,
+    EnableChannel, EnableTokenProducer, EnReceiveStage, EnSendStage,
+    HandshakeProtocol, InputJoin, InputPort, MatchedDelayRequirement, OutputFork,
+    OutputPort, StageStorage, StorageSlot, TimingModel, lower_microarchitecture,
+)
+from .async_rtl_codegen import AsyncRTLCodegenError, emit_async_systemverilog
+from .async_template_binding import (
+    AsyncTemplateBindingError, BoundAsyncAssignment, BoundAsyncConnection,
+    BoundAsyncInstance, BoundAsyncModule, BoundAsyncModulePort,
+    BoundAsyncParameterBinding, BoundAsyncPortBinding, BoundAsyncSignal,
+    BoundAsyncVariableBinding, BoundEnableChannel, bind_async_templates,
+)
 from .behavioral_ir import (
     Assign, BehavioralIRError, BehavioralModule, ChannelEndpoint, Expression, If,
-    Parameter, Parallel, PayloadType, PayloadWidth, Receive, Send, Sequence, Skip, SourceLocation, Variable,
-    ONE_BIT, expression_payload_type, lower_behavioral, payload_types_compatible,
+    ONE_BIT, Parallel, Parameter, PayloadType, PayloadWidth, Receive, Send,
+    Sequence, Skip, SourceLocation, Variable, expression_payload_type,
+    lower_behavioral, payload_types_compatible,
 )
-from .communication_normalization import (
-    BodyChannel, BodyChannelDirection, BodyCommunication, BodyReceive, BodySend,
-    CommunicationSite, DummyToken, Enable, NormalizationError, NormalizedModule,
-    NormalizedProcess, NormalizedReceive, NormalizedSend, normalize_communication,
+from .communication_decomposition import (
+    BodyReceive, BodySend, DecomposedTransaction, Enable, EnReceive, EnSend,
+    InvalidPayload, decompose_transaction,
 )
 from .decomposed_svcsp import DecomposedSVCSPError, emit_conditional_send_decomposition
-from .dependency_analysis import (
-    DependencyAnalysisError, DependencyEdge, DependencyGraph, DependencyKind,
-    DependencyNode, NodeKind, analyze_dependencies,
+from .frontend import FrontendError, parse_file, parse_text
+from .semantic_analysis import (
+    ReceiveValidity, SemanticDependency, SemanticDependencyKind,
+    SemanticValidationError, SemanticallyValidatedTransaction, analyze_semantics,
 )
-from .pipeline_synthesis import (
-    PipelineDependency, PipelineGraph, PipelineMetadata, PipelineStage, PipelineSynthesisError,
-    StageKind, WrapperAttachment, synthesize_pipeline,
+from .transaction import (
+    RegionOperation, StructurallyValidatedTransaction, TransactionStructureError,
+    TransactionWarning, extract_transaction,
 )
-from .microarchitecture_ir import (
-    ControllerKind, HandshakePort, MatchedDelayRequirement, MicroarchitectureDependency,
-    MicroarchitectureError, MicroarchitectureGraph, MicroarchitectureMetadata,
-    MicroarchitectureStage, MicroarchitectureWrapper, StorageRequirement, select_microarchitecture,
-)
-from .template_binding import (
-    BoundBodyStage, BoundLogicalSignal, BoundMatchedDelay, BoundPortBinding, BoundStorage, BoundVariableBinding,
-    BoundTemplateParameterBinding,
-    BoundModulePort, BoundStructuralDependency, BoundStructuralGraph, BoundWrapper, ModulePortRole,
-    BoundSignalDriver, PortDirection, PortSemanticKind, SignalDriverKind,
-    StructuralTemplate, TEMPLATE_CONTRACTS, TemplateBindingError, TemplateContract, TemplateParameter, TemplatePort,
-    bind_templates, template_contract,
-)
-from .rtl_codegen import RTLCodegenError, emit_systemverilog
-from .linear_compiler import LinearCompilationError, compile_linear_file
 
 __all__ = [
-    "Assign", "BehavioralIRError", "BehavioralModule", "ChannelEndpoint", "Expression",
-    "FrontendError", "If", "Parameter", "Parallel", "PayloadType", "PayloadWidth", "Receive", "Send", "Sequence", "Skip",
-    "SourceLocation", "Variable", "ONE_BIT", "expression_payload_type", "payload_types_compatible",
-    "BodyChannel", "BodyChannelDirection", "BodyCommunication", "BodyReceive", "BodySend",
-    "CommunicationSite", "DummyToken", "Enable", "NormalizationError", "NormalizedModule", "NormalizedProcess",
-    "NormalizedReceive", "NormalizedSend", "lower_behavioral",
-    "normalize_communication", "parse_file", "parse_text",
-    "DecomposedSVCSPError", "emit_conditional_send_decomposition",
-    "DependencyAnalysisError", "DependencyEdge", "DependencyGraph", "DependencyKind",
-    "DependencyNode", "NodeKind", "analyze_dependencies",
-    "PipelineDependency", "PipelineGraph", "PipelineMetadata", "PipelineStage", "PipelineSynthesisError",
-    "StageKind", "WrapperAttachment", "synthesize_pipeline",
-    "ControllerKind", "HandshakePort", "MatchedDelayRequirement", "MicroarchitectureDependency",
-    "MicroarchitectureError", "MicroarchitectureGraph", "MicroarchitectureMetadata",
-    "MicroarchitectureStage", "MicroarchitectureWrapper", "StorageRequirement", "select_microarchitecture",
-    "BoundBodyStage", "BoundLogicalSignal", "BoundMatchedDelay", "BoundPortBinding", "BoundStorage", "BoundVariableBinding",
-    "BoundTemplateParameterBinding",
-    "BoundModulePort", "BoundStructuralDependency", "BoundStructuralGraph", "BoundWrapper", "ModulePortRole",
-    "BoundSignalDriver", "PortDirection", "PortSemanticKind", "SignalDriverKind",
-    "StructuralTemplate", "TEMPLATE_CONTRACTS", "TemplateBindingError", "TemplateContract", "TemplateParameter", "TemplatePort",
-    "bind_templates", "template_contract",
-    "RTLCodegenError", "emit_systemverilog",
-    "LinearCompilationError", "compile_linear_file",
+    "Assign", "AsyncMicroarchitecture", "AsyncRTLCodegenError", "AsyncTemplateBindingError",
+    "BehavioralIRError", "BehavioralModule", "BodyReceive", "BodySend", "BoundAsyncAssignment",
+    "BoundAsyncConnection", "BoundAsyncInstance", "BoundAsyncModule", "BoundAsyncModulePort",
+    "BoundAsyncParameterBinding", "BoundAsyncPortBinding", "BoundAsyncSignal", "BoundAsyncVariableBinding",
+    "BoundEnableChannel", "BufferStyle", "ChannelEndpoint", "CombinationalBlock", "DecomposedSVCSPError",
+    "DecomposedTransaction", "Enable", "EnableAvailability", "EnableChannel", "EnableTokenProducer",
+    "EnReceive", "EnReceiveStage", "EnSend", "EnSendStage", "Expression", "FrontendError",
+    "HandshakeProtocol", "If", "InputJoin", "InputPort", "InvalidPayload", "MatchedDelayRequirement",
+    "ONE_BIT", "OutputFork", "OutputPort", "Parallel", "Parameter", "PayloadType", "PayloadWidth",
+    "Receive", "ReceiveValidity", "RegionOperation", "SemanticDependency", "SemanticDependencyKind",
+    "SemanticValidationError", "SemanticallyValidatedTransaction", "Send", "Sequence", "Skip",
+    "SourceLocation", "StageStorage", "StorageSlot", "StructurallyValidatedTransaction", "TimingModel",
+    "TransactionStructureError", "TransactionWarning", "Variable", "analyze_semantics",
+    "bind_async_templates", "compile_async_file", "decompose_transaction",
+    "emit_async_systemverilog", "emit_conditional_send_decomposition", "expression_payload_type",
+    "extract_transaction", "lower_behavioral", "lower_microarchitecture", "parse_file", "parse_text",
+    "payload_types_compatible",
 ]

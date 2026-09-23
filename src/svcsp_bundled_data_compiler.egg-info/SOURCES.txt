@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-src/svcsp_bundled_data_compiler.egg-info/PKG-INFO
-src/svcsp_bundled_data_compiler.egg-info/SOURCES.txt
-src/svcsp_bundled_data_compiler.egg-info/dependency_links.txt
-src/svcsp_bundled_data_compiler.egg-info/requires.txt
-src/svcsp_bundled_data_compiler.egg-info/top_level.txt
-src/svcsp_compiler/__init__.py
-tests/test_smoke.py

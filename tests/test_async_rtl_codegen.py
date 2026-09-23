@@ -88,8 +88,6 @@ def _assert_exact_binding_rendered(bound, rtl: str) -> None:
         assert f".{binding.formal_name}({value})" in rtl
     for binding in bound.port_bindings:
         assert f".{binding.formal_name}({binding.actual_signal_id})" in rtl
-    assert "PipelineGraph" not in rtl
-    assert "NormalizedModule" not in rtl
     assert "source_sequence" not in rtl
 
 
