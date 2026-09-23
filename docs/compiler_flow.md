@@ -85,6 +85,11 @@ structure.
 Preserve the module-owned identities of explicit external inputs separately
 from local variables.  Do not create persistent-state semantics.
 
+Preserve `BehavioralModule.parameters` as the canonical ordered source-
+parameter identity set. Every behavioral parameter expression and every
+`PayloadWidth.parameters` entry must refer to the exact object in that tuple;
+M2 must not recreate structurally equal parameter objects for symbolic widths.
+
 A source-level `Sequence` does not by itself imply serialized hardware
 communication.
 
@@ -121,6 +126,8 @@ Output:
 Structurally Validated Transaction
 ```
 
+M3 preserves source-parameter identities and creates no parameter semantics.
+
 ## 4. Conditional Communication Decomposition
 
 Transform conditional communication into:
@@ -145,6 +152,9 @@ Output:
 ```text
 Decomposed Transaction
 ```
+
+M4 preserves source-parameter identities in expressions and effective enables;
+it creates no parameter semantics.
 
 ## 5. Dependency / Validity Analysis + Semantic Validation
 
@@ -176,6 +186,9 @@ dependency information
 validity information
 ```
 
+M5 preserves source-parameter identities and validates their existing allowed
+uses; it does not add parameter type or width inference.
+
 ## 6. Asynchronous Microarchitecture Lowering
 
 Map validated transaction semantics onto explicit asynchronous hardware.
@@ -196,6 +209,7 @@ EN-stage matched-delay requirements
 
 M6 realizes only the availability selected for a validated Enable; it does not
 invent an external input, persistent state, or a control Channel.
+It preserves source-parameter identities and creates no parameter semantics.
 
 For the current backend, use
 `four_phase_bundled_data_backend.md` as the authoritative hardware
@@ -228,6 +242,19 @@ exact M6-resource-to-RTL-instance traceability
 M7 emits each explicit external input as a public module input port with its
 preserved identity.  It must not infer an external input from a local variable
 that lacks a definition.
+
+M7 binds each exact source `Parameter` to a source-module-parameter
+representation distinct from RTL-library instance parameter bindings. It
+preserves all `BehavioralModule.parameters` in source order, including unused
+parameters, and emits their declarations before the generated module port list.
+It preserves names exactly and fails closed on duplicate or conflicting
+module-scope names. An emitted parameter expression or symbolic width must
+resolve through its exact source-module-parameter binding; M7 must not emit an
+undeclared symbolic parameter name.
+
+Before transmitting an M4 logical Enable on its one-bit enable Channel, M7
+booleanizes the condition to one logical bit. This binding action does not
+change M6 availability or topology.
 
 M7 must not invent:
 

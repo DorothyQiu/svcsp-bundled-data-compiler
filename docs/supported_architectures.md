@@ -58,9 +58,63 @@ Conditional Send guards may additionally use valid unconditional Receive data
 and transaction-local computed values, subject to dependency and validity
 analysis.
 
-Parameters are valid semantic guard sources.  Generated-RTL module-parameter
-emission is a separate backend capability and is not added by the R7
-external-input contract.
+Parameters are valid semantic guard sources. Their source and generated-RTL
+contract is defined below.
+
+## Source Module Parameters
+
+The supported source parameter subset is limited to module-header declarations:
+
+```systemverilog
+parameter int NAME
+parameter int NAME = DEFAULT
+```
+
+For example:
+
+```systemverilog
+module sized #(parameter int W = 8) (Channel #(W) A, B);
+```
+
+Other parameter types, `localparam`, and type parameters are outside the
+current source language.
+
+`BehavioralModule.parameters` is the canonical ordered identity set for source
+parameters. Every `Parameter` reference in a behavioral `Expression`, and
+every `Parameter` recorded by `PayloadWidth.parameters`, must identify the
+exact canonical object owned by that tuple. A structurally equal replacement is
+not an equivalent source identity.
+
+Source parameters may be used where the current source and width rules can
+already prove the expression, including symbolic payload widths and guards.
+R8 does not add parameter-aware width or type inference for ordinary data
+expressions. Expressions such as `x + P` and `Send(P)` remain unsupported when
+the existing proof rules cannot establish their width; the compiler must fail
+closed rather than resize or reinterpret them.
+
+Generated RTL preserves every source parameter in source order, including an
+otherwise unused parameter. It declares them before the module port list:
+
+```systemverilog
+module sized #(
+    parameter int W = 8
+) (
+    // ports
+);
+```
+
+If a supported source `Parameter` has no default, generated RTL emits its
+corresponding parameter declaration without inventing a value. Names are
+preserved exactly. Duplicate or conflicting generated module-scope names are
+errors; the compiler must not silently rename a source parameter.
+
+Generated component-instance parameters, such as `.WIDTH(W)`, are distinct
+from source-module parameters. A source parameter defines the public generated
+module interface; an instance parameter configures an RTL-library component.
+An emitted parameter expression or symbolic width must resolve through the
+exact bound source-parameter identity. Generated RTL must not use `W` in
+`[W-1:0]` or `.WIDTH(W)` unless that exact source parameter is declared in the
+generated module parameter list.
 
 ## Unconditional Transactions
 

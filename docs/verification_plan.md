@@ -274,6 +274,36 @@ End-to-end RTL module-parameter emission is outside the R7 external-input scope.
 Keep permanent negative coverage for an undefined local guard: it must not be
 accepted as an implicit module input.
 
+## R8. Source Module Parameter Binding and RTL Emission
+
+Verify:
+
+```text
+only supported source parameter int NAME / parameter int NAME = DEFAULT syntax
+exact Expression Parameter identity against BehavioralModule.parameters
+exact PayloadWidth Parameter identity against BehavioralModule.parameters
+source-order source-module-parameter binding, including unused parameters
+default and no-default declaration emission without invented values
+symbolic-width declaration before every generated [W-1:0] or .WIDTH(W) use
+strict separation of source-module parameters from RTL-library instance parameters
+exact parameter-expression binding before generated expression rendering
+integer parameter guard booleanization, including P = 2
+multi-bit external-input guard booleanization
+generated symbolic-width RTL compilation
+```
+
+Reject permanently:
+
+```text
+unowned or structurally-equal-but-not-identical Parameter references
+duplicate or conflicting source parameter/public-port module-scope names
+emission of a symbolic parameter use without its exact generated declaration
+```
+
+Ordinary parameter arithmetic and data-expression width inference, including
+`x + P` and `Send(P)`, remain outside R8. Existing failure-closed width proof
+rules continue to own those cases.
+
 ## Permanent Negative Regression
 
 Rejection behavior defined by `supported_architectures.md` and by the owning

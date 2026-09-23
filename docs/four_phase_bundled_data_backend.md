@@ -396,6 +396,13 @@ until their final control circuits are defined.
 Each M4 logical Enable is realized by this backend as a one-bit four-phase
 bundled-data Channel carrying exactly one enable token per source transaction.
 
+The token payload is a logical one-bit value, not a raw truncation of the
+source expression. Before an Enable condition is transmitted, M7 must
+booleanize it equivalently to `!!(condition)`. Thus an integer parameter guard
+with value `2`, and a multi-bit external-input guard with any nonzero value,
+transmit enable `1`; neither may be implemented by selecting or truncating the
+least significant bit.
+
 Enable availability is an M6 scheduling decision:
 
 ```text
