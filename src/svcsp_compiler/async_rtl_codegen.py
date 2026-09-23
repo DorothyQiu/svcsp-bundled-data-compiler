@@ -101,6 +101,21 @@ def _validate(bound: BoundAsyncModule) -> None:
             raise AsyncRTLCodegenError(f"{instance.id} binds a parameter more than once")
     if any(item.target_signal_id not in signal_ids for item in bound.assignments):
         raise AsyncRTLCodegenError("assignment targets an undeclared signal")
+    if any(source not in signal_ids for item in bound.assignments for source in item.source_signal_ids):
+        raise AsyncRTLCodegenError("assignment references an undeclared source signal")
+    module_variables = bound.architecture.validated.decomposed.transaction.behavioral.variables
+    for variable in module_variables:
+        matches = [item for item in bound.variable_bindings if item.variable is variable]
+        if len(matches) != 1:
+            raise AsyncRTLCodegenError(f"variable {variable.name} lacks one exact binding")
+    for binding in bound.variable_bindings:
+        if not any(binding.variable is variable for variable in module_variables):
+            raise AsyncRTLCodegenError(f"binding references non-module variable {binding.variable.name}")
+        if binding.signal_id not in signal_ids:
+            raise AsyncRTLCodegenError(f"variable {binding.variable.name} references an undeclared signal")
+        signal = next(signal for signal in bound.signals if signal.id == binding.signal_id)
+        if signal.width != binding.variable.payload_type.width:
+            raise AsyncRTLCodegenError(f"variable {binding.variable.name} has the wrong bound width")
 
 
 def _width(width: behavioral.PayloadWidth) -> str:
@@ -121,19 +136,24 @@ def _parameter_value(value: behavioral.PayloadWidth) -> str:
 
 def _assignment_rhs(assignment, bound: BoundAsyncModule) -> str:
     if assignment.expression is not None:
-        return _expression(assignment.expression)
-    if assignment.kind == "pack_input_handshakes":
-        values = [f"input_{index}_body_req" for index, _ in enumerate(bound.architecture.input_join.inputs)]
-        return _concatenate(values)
-    if assignment.kind == "unpack_input_handshakes":
-        index = bound.architecture.input_join.inputs.index(assignment.source)
-        return f"input_join_ack[{index}]"
-    if assignment.kind == "unpack_output_launch":
-        index = bound.architecture.output_fork.outputs.index(assignment.source)
-        return f"output_fork_launch[{index}]"
+        return _expression(assignment.expression, bound)
+    if assignment.kind == "transaction_entry_launch":
+        if len(assignment.source_signal_ids) != 1:
+            raise AsyncRTLCodegenError("transaction-entry launch requires one control source")
+        return f"~{assignment.source_signal_ids[0]}"
     if assignment.kind == "pack_output_completion":
-        values = [f"output_{index}_complete" for index, _ in enumerate(bound.architecture.output_fork.outputs)]
-        return _concatenate(values)
+        if not assignment.source_signal_ids:
+            raise AsyncRTLCodegenError("completion packing lacks bound source signals")
+        return _concatenate(list(assignment.source_signal_ids))
+    if assignment.kind == "pack_input_handshakes":
+        if not assignment.source_signal_ids:
+            raise AsyncRTLCodegenError("input packing lacks bound source signals")
+        return _concatenate(list(assignment.source_signal_ids))
+    if assignment.kind in {"signal_copy", "unpack_input_handshakes", "unpack_output_launch"}:
+        if len(assignment.source_signal_ids) != 1:
+            raise AsyncRTLCodegenError(f"{assignment.kind} requires one bound source signal")
+        source = assignment.source_signal_ids[0]
+        return source if assignment.source_index is None else f"{source}[{assignment.source_index}]"
     raise AsyncRTLCodegenError(f"unsupported bound assignment kind {assignment.kind}")
 
 
@@ -143,10 +163,10 @@ def _concatenate(values: list[str]) -> str:
     return "{" + ", ".join(reversed(values)) + "}"
 
 
-def _expression(expression: behavioral.Expression) -> str:
+def _expression(expression: behavioral.Expression, bound: BoundAsyncModule) -> str:
     if expression.form == "name":
         if expression.variable is not None:
-            return expression.variable.name
+            return _variable_signal(expression.variable, bound)
         if expression.value is not None:
             return expression.value
     if expression.form == "parameter" and expression.parameter is not None:
@@ -154,22 +174,31 @@ def _expression(expression: behavioral.Expression) -> str:
     if expression.form == "literal" and expression.value is not None:
         return expression.value
     if expression.form == "unary" and expression.operator is not None and len(expression.operands) == 1:
-        return f"({expression.operator}{_expression(expression.operands[0])})"
+        return f"({expression.operator}{_expression(expression.operands[0], bound)})"
     if expression.form == "binary" and expression.operator is not None and len(expression.operands) == 2:
-        return f"({_expression(expression.operands[0])} {expression.operator} {_expression(expression.operands[1])})"
+        return (f"({_expression(expression.operands[0], bound)} {expression.operator} "
+                f"{_expression(expression.operands[1], bound)})")
     if expression.form == "conditional" and len(expression.operands) == 3:
-        return (f"({_expression(expression.operands[0])} ? {_expression(expression.operands[1])} : "
-                f"{_expression(expression.operands[2])})")
+        return (f"({_expression(expression.operands[0], bound)} ? {_expression(expression.operands[1], bound)} : "
+                f"{_expression(expression.operands[2], bound)})")
     if expression.form == "select" and expression.variable is not None:
-        result = expression.variable.name
+        result = _variable_signal(expression.variable, bound)
         for selector in expression.operands:
             if selector.form == "index" and len(selector.operands) == 1:
-                result += f"[{_expression(selector.operands[0])}]"
+                result += f"[{_expression(selector.operands[0], bound)}]"
             elif selector.form == "range" and len(selector.operands) == 2:
-                result += f"[{_expression(selector.operands[0])}:{_expression(selector.operands[1])}]"
+                result += (f"[{_expression(selector.operands[0], bound)}:"
+                           f"{_expression(selector.operands[1], bound)}]")
             else:
                 raise AsyncRTLCodegenError("unsupported selection expression")
         return result
     if expression.form == "concatenate" and expression.operands:
-        return "{" + ", ".join(_expression(item) for item in expression.operands) + "}"
+        return "{" + ", ".join(_expression(item, bound) for item in expression.operands) + "}"
     raise AsyncRTLCodegenError(f"unsupported bound expression {expression.form}")
+
+
+def _variable_signal(variable: behavioral.Variable, bound: BoundAsyncModule) -> str:
+    matches = [item.signal_id for item in bound.variable_bindings if item.variable is variable]
+    if len(matches) != 1:
+        raise AsyncRTLCodegenError(f"variable {variable.name} lacks one exact M7A binding")
+    return matches[0]

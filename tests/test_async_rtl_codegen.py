@@ -1,6 +1,8 @@
 """M7B structural SystemVerilog-emission contract tests."""
 from __future__ import annotations
 
+import re
+
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
 from svcsp_compiler.async_rtl_codegen import emit_async_systemverilog
 from svcsp_compiler.async_template_binding import bind_async_templates
@@ -11,6 +13,7 @@ from svcsp_compiler.behavioral_ir import (
     Expression,
     If,
     ONE_BIT,
+    Parameter,
     PayloadType,
     PayloadWidth,
     Receive,
@@ -62,6 +65,12 @@ def _bound(program: _Program, body):
 def _width(width: PayloadWidth) -> str:
     assert width.bits is not None
     return "" if width.bits == 1 else f" [{width.bits - 1}:0]"
+
+
+def _variable_signal_id(bound, variable: Variable) -> str:
+    bindings = [item for item in bound.variable_bindings if item.variable is variable]
+    assert len(bindings) == 1
+    return bindings[0].signal_id
 
 
 def _assert_exact_binding_rendered(bound, rtl: str) -> None:
@@ -189,10 +198,71 @@ def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_en
 
     for assignment in bound.assignments:
         assert f"assign {assignment.target_signal_id} = " in rtl
-    assert "assign combinational_1_value = (a + 1'b1);" in rtl
-    assert "assign storage_0_data_in = y;" in rtl
+    a_signal = _variable_signal_id(bound, program.variable("a"))
+    y_signal = _variable_signal_id(bound, program.variable("y"))
+    assert f"assign combinational_1_value = ({a_signal} + 1'b1);" in rtl
+    assert f"assign storage_0_data_in = {y_signal};" in rtl
     enable = bound.enable_channels[0]
-    assert f"assign {enable.data_signal_id} = select;" in rtl
+    select_signal = _variable_signal_id(bound, program.variable("select"))
+    assert f"assign {enable.value_signal_id} = {select_signal};" in rtl
+    assert f"assign {enable.data_signal_id} = {select_signal};" not in rtl
+
+
+def test_expression_rendering_uses_only_m7a_bound_variable_signals() -> None:
+    program = _Program()
+    received = program.variable("raw_source")
+    parameter = Parameter("P", "async_codegen", SourceLocation("async_codegen.sv", 1, 1), "1'b1")
+    name = program.name("raw_source")
+    select = Expression("select", value="raw_source", variable=received, operands=(
+        Expression("index", operands=(Expression("literal", value="0"),)),
+    ))
+    unary = Expression("unary", operator="~", operands=(name,))
+    binary = Expression("binary", operator="&", operands=(name, unary))
+    conditional = Expression("conditional", operands=(name, select, binary))
+    expression = Expression("concatenate", operands=(
+        conditional,
+        Expression("parameter", value="P", parameter=parameter),
+        Expression("literal", value="1'b0"),
+    ))
+    module = BehavioralModule("expression_binding", Sequence((
+        Receive(ChannelEndpoint("A", payload_type=_BIT), received),
+        Send(ChannelEndpoint("B", payload_type=_BIT), expression),
+    )), (), (received,), (parameter,))
+    bound = bind_async_templates(lower_microarchitecture(analyze_semantics(
+        decompose_transaction(extract_transaction(module)),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    received_signal = _variable_signal_id(bound, received)
+    storage_assignment = next(line for line in rtl.splitlines()
+                              if line.startswith("  assign storage_0_data_in ="))
+
+    assert received_signal in storage_assignment
+    assert "P" in storage_assignment and "1'b0" in storage_assignment
+    assert not re.search(r"(?<![A-Za-z0-9_$])raw_source(?![A-Za-z0-9_$])", storage_assignment)
+    assert len(bound.variable_bindings) == 1
+
+
+def test_codegen_only_renders_prebound_variable_connectivity() -> None:
+    program = _Program()
+    received = program.variable("a")
+    assigned = program.variable("y")
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        Assign(assigned, Expression("binary", operator="+", operands=(
+            program.name("a"), Expression("literal", value="1'b1"),
+        ))),
+        program.send("B", program.name("y")),
+    )))
+    variable_bindings = tuple(bound.variable_bindings)
+    signal_ids = tuple(signal.id for signal in bound.signals)
+
+    rtl = emit_async_systemverilog(bound)
+
+    assert tuple(bound.variable_bindings) == variable_bindings
+    assert tuple(signal.id for signal in bound.signals) == signal_ids
+    for binding in variable_bindings:
+        assert binding.signal_id in signal_ids
+        assert f"logic {binding.signal_id};" in rtl
 
 
 def test_vectorized_controllers_storage_and_delay_formals_emit_exactly_as_bound() -> None:
@@ -230,12 +300,15 @@ def test_enable_channel_is_emitted_as_req_ack_data_without_scalar_enable_interfa
         If(select, program.send("B", program.name("a")), Skip()),
     )))
     rtl = emit_async_systemverilog(bound)
+    select_signal = _variable_signal_id(bound, program.variable("select"))
 
     for channel in bound.enable_channels:
         assert f"logic {channel.request_signal_id};" in rtl
         assert f"logic {channel.acknowledge_signal_id};" in rtl
         assert f"logic {channel.data_signal_id};" in rtl
-        assert f"assign {channel.data_signal_id} = select;" in rtl
+        assert f"logic {channel.value_signal_id};" in rtl
+        assert f"assign {channel.value_signal_id} = {select_signal};" in rtl
+        assert f"assign {channel.data_signal_id} = {select_signal};" not in rtl
         assert f".req({channel.request_signal_id})" in rtl
         assert f".ack({channel.acknowledge_signal_id})" in rtl
         assert f".data({channel.data_signal_id})" in rtl
@@ -257,3 +330,30 @@ def test_assignments_and_rtl_are_byte_deterministic_for_identical_bound_modules(
 
     assert first.assignments == second.assignments
     assert emit_async_systemverilog(first) == emit_async_systemverilog(second)
+
+
+def test_conditional_completion_topology_is_emitted_once_exactly_as_bound() -> None:
+    program = _Program()
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+    )))
+    rtl = emit_async_systemverilog(bound)
+
+    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
+    completion_vector = next(item.actual_signal_id for item in bound.port_bindings
+                             if item.instance_id == completion.id and item.formal_name == "complete")
+    completion_width = next(item.width for item in bound.signals if item.id == completion_vector)
+    post_channels = [item for item in bound.enable_channels if item.availability.value == "post_input"]
+    completion_assignments = [item for item in bound.assignments
+                              if item.target_signal_id == completion_vector]
+
+    assert completion_width.bits == 1 + len(post_channels)
+    assert len(completion_assignments) == 1
+    assert rtl.count(f"assign {completion_vector} =") == 1
+    for channel in post_channels:
+        sender_bindings = [item for item in bound.port_bindings if item.instance_id == channel.body_sender.id]
+        assert any(item.formal_name == "ack" and item.actual_signal_id == channel.acknowledge_signal_id
+                   for item in sender_bindings)
+        assert f".ack({channel.acknowledge_signal_id})" in rtl
+    assert "output_0_complete" not in rtl

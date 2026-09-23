@@ -93,6 +93,16 @@ class BoundAsyncAssignment:
     expression: behavioral.Expression | None
     source: object
     kind: str
+    source_signal_ids: tuple[str, ...] = ()
+    source_index: int | None = None
+
+
+@dataclass(frozen=True)
+class BoundAsyncVariableBinding:
+    """One compiler-owned Behavioral Variable mapped to one RTL signal."""
+
+    variable: behavioral.Variable
+    signal_id: str
 
 
 @dataclass(frozen=True)
@@ -122,6 +132,7 @@ class BoundAsyncModule:
     parameter_bindings: tuple[BoundAsyncParameterBinding, ...] = ()
     enable_channels: tuple[BoundEnableChannel, ...] = ()
     assignments: tuple[BoundAsyncAssignment, ...] = ()
+    variable_bindings: tuple[BoundAsyncVariableBinding, ...] = ()
 
 
 _IDENTIFIER = re.compile(r"[^A-Za-z0-9_$]")
@@ -155,6 +166,18 @@ def bind_async_templates(architecture: AsyncMicroarchitecture) -> BoundAsyncModu
         ports.append(BoundAsyncModulePort(identifier, port_flow, role, direction, endpoint, width, identifier))
         return identifier
 
+    variable_bindings: list[BoundAsyncVariableBinding] = []
+    for index, variable in enumerate(architecture.validated.decomposed.transaction.behavioral.variables):
+        identifier = f"body_var_{index}_{_IDENTIFIER.sub('_', variable.name) or 'variable'}"
+        signal(identifier, "payload", variable.payload_type.width)
+        variable_bindings.append(BoundAsyncVariableBinding(variable, identifier))
+
+    def variable_signal(variable: behavioral.Variable) -> str:
+        matches = [binding.signal_id for binding in variable_bindings if binding.variable is variable]
+        if len(matches) != 1:
+            raise AsyncTemplateBindingError(f"missing or ambiguous binding for variable {variable.name}")
+        return matches[0]
+
     join = architecture.input_join
     instances.append(BoundAsyncInstance(
         "input_join", "four_phase_input_join", join, inputs=join.inputs,
@@ -181,13 +204,14 @@ def bind_async_templates(architecture: AsyncMicroarchitecture) -> BoundAsyncModu
         data = external(endpoint, "receive", "payload", "input", payload.width)
         instance_id = f"input_{index}"
         stage = receive_stage_by_port.get(input_port)
-        if stage is None:
-            instances.append(BoundAsyncInstance(instance_id, "four_phase_receive_port", input_port))
-        else:
+        if stage is not None:
             instance_id = f"en_receive_stage_{index}"
             instances.append(BoundAsyncInstance(instance_id, "en_receive_stage", stage,
                                                 enable_channel=stage.enable_channel))
-        body_data = signal(f"{instance_id}_body_data", "payload", payload.width, endpoint)
+        target = _target_variable(operation.target)
+        if target is None:
+            raise AsyncTemplateBindingError("Receive target has no Variable identity")
+        body_data = variable_signal(target)
         receive_data[input_port] = body_data
         adapter_id = instance_id
         connections.extend((
@@ -235,9 +259,7 @@ def bind_async_templates(architecture: AsyncMicroarchitecture) -> BoundAsyncModu
         data = external(endpoint, "send", "payload", "output", payload.width)
         instance_id = f"output_{index}"
         stage = send_stage_by_port.get(output)
-        if stage is None:
-            instances.append(BoundAsyncInstance(instance_id, "four_phase_send_port", output))
-        else:
+        if stage is not None:
             instance_id = f"en_send_stage_{index}"
             instances.append(BoundAsyncInstance(instance_id, "en_send_stage", stage,
                                                 enable_channel=stage.enable_channel))
@@ -257,15 +279,16 @@ def bind_async_templates(architecture: AsyncMicroarchitecture) -> BoundAsyncModu
         _bind_delay(requirement, instances, connections, output_indices, storage_indices)
 
     instances, signals, connections, port_bindings, parameter_bindings, enable_channel_bindings, assignments = _typed_bindings(
-        architecture, instances, signals, ports,
+        architecture, instances, signals, ports, tuple(variable_bindings),
     )
     return BoundAsyncModule(architecture, tuple(instances), tuple(signals), tuple(ports), tuple(connections),
                             tuple(port_bindings), tuple(parameter_bindings), tuple(enable_channel_bindings),
-                            tuple(assignments))
+                            tuple(assignments), tuple(variable_bindings))
 
 
 def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundAsyncInstance],
-                    signals: list[BoundAsyncSignal], ports: list[BoundAsyncModulePort]) -> tuple[
+                    signals: list[BoundAsyncSignal], ports: list[BoundAsyncModulePort],
+                    variable_bindings: tuple[BoundAsyncVariableBinding, ...]) -> tuple[
                         list[BoundAsyncInstance], list[BoundAsyncSignal], list[BoundAsyncConnection],
                         list[BoundAsyncPortBinding], list[BoundAsyncParameterBinding],
                         list[BoundEnableChannel], list[BoundAsyncAssignment]]:
@@ -283,6 +306,26 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
         return next(port.signal_id for port in ports
                     if port.endpoint == endpoint and port.role == role and
                     (port.flow == flow if role == "payload" else port.flow == f"{flow}_{role}"))
+
+    def variable_signal(variable: behavioral.Variable) -> str:
+        matches = [binding.signal_id for binding in variable_bindings if binding.variable is variable]
+        if len(matches) != 1:
+            raise AsyncTemplateBindingError(f"missing or ambiguous binding for variable {variable.name}")
+        return matches[0]
+
+    def expression_signals(expression: behavioral.Expression) -> tuple[str, ...]:
+        result: list[str] = []
+
+        def visit(item: behavioral.Expression) -> None:
+            if item.variable is not None:
+                identifier = variable_signal(item.variable)
+                if identifier not in result:
+                    result.append(identifier)
+            for operand in item.operands:
+                visit(operand)
+
+        visit(expression)
+        return tuple(result)
 
     by_source = {instance.source: instance for instance in instances}
     formals: dict[str, tuple[str, ...]] = {}
@@ -319,6 +362,10 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
         bind(sender, "data", data)
         assignments.append(BoundAsyncAssignment(value, channel.enable.condition, channel.enable,
                                                 "enable_value"))
+        if channel.availability.value == "pre_input":
+            assignments.append(BoundAsyncAssignment(
+                launch, None, architecture.validated, "transaction_entry_launch", (stage_complete,),
+            ))
         enable_signals[channel] = request, acknowledge, data
         enable_channel_bindings.append(BoundEnableChannel(
             channel, channel, channel.availability,
@@ -331,28 +378,28 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
     join_request = ensure("input_join_req", "request", input_count)
     join_acknowledge = ensure("input_join_ack", "acknowledge", input_count)
     input_body: dict[InputPort, tuple[str, str, str]] = {}
+    input_request_signals: list[str] = []
     for index, input_port in enumerate(join.inputs):
         operation = input_port.body_receive.source.operation
         assert isinstance(operation, behavioral.Receive)
         payload = _receive_payload_type(operation)
+        target = _target_variable(operation.target)
+        if target is None:
+            raise AsyncTemplateBindingError("Receive target has no Variable identity")
         body = (
             join_request if len(join.inputs) == 1 else ensure(f"input_{index}_body_req", "request", behavioral.ONE_BIT),
             join_acknowledge if len(join.inputs) == 1 else ensure(f"input_{index}_body_ack", "acknowledge", behavioral.ONE_BIT),
-            ensure(f"input_{index}_body_data", "payload", payload.width, operation.channel),
+            variable_signal(target),
         )
         input_body[input_port] = body
         req, ack, data = body
+        external_req = external(operation.channel, "receive", "request")
+        external_ack = external(operation.channel, "receive", "acknowledge")
+        external_data = external(operation.channel, "receive", "payload")
         if input_port.en_receive is None:
-            port_instance = by_source[input_port]
-            port_formals = ("external_req", "external_ack", "external_data", "body_req", "body_ack", "body_data", "control")
-            formals[port_instance.id] = port_formals
-            for formal, actual in (
-                ("external_req", external(operation.channel, "receive", "request")),
-                ("external_ack", external(operation.channel, "receive", "acknowledge")),
-                ("external_data", external(operation.channel, "receive", "payload")),
-                ("body_req", req), ("body_ack", ack), ("body_data", data), ("control", join_control),
-            ):
-                bind(port_instance, formal, actual)
+            assignments.append(BoundAsyncAssignment(req, None, input_port, "signal_copy", (external_req,)))
+            assignments.append(BoundAsyncAssignment(external_ack, None, input_port, "signal_copy", (ack,)))
+            assignments.append(BoundAsyncAssignment(data, None, input_port, "signal_copy", (external_data,)))
         else:
             stage = next(item for item in architecture.en_receive_stages if item.input_port is input_port)
             stage_instance = by_source[stage]
@@ -361,22 +408,29 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
                 "enable_req", "enable_ack", "enable_data", "external_req", "external_ack", "external_data",
                 "body_req", "body_ack", "body_data",
             )
+            parameters[stage_instance.id] = ("WIDTH",)
+            parameter_bindings.append(BoundAsyncParameterBinding(stage_instance.id, "WIDTH", payload.width))
             for formal, actual in (
                 ("enable_req", enable_req), ("enable_ack", enable_ack), ("enable_data", enable_data),
-                ("external_req", external(operation.channel, "receive", "request")),
-                ("external_ack", external(operation.channel, "receive", "acknowledge")),
-                ("external_data", external(operation.channel, "receive", "payload")),
+                ("external_req", external_req), ("external_ack", external_ack), ("external_data", external_data),
                 ("body_req", req), ("body_ack", ack), ("body_data", data),
             ):
                 bind(stage_instance, formal, actual)
-        assignments.append(BoundAsyncAssignment(join_request, None, input_port, "pack_input_handshakes"))
-        assignments.append(BoundAsyncAssignment(ack, None, input_port, "unpack_input_handshakes"))
-    formals[join_instance.id] = ("input_req", "input_ack", "stage_release", "control")
+        input_request_signals.append(req)
+        if len(join.inputs) > 1:
+            assignments.append(BoundAsyncAssignment(
+                ack, None, input_port, "unpack_input_handshakes", (join_acknowledge,), index,
+            ))
+    if len(join.inputs) > 1:
+        assignments.append(BoundAsyncAssignment(
+            join_request, None, tuple(join.inputs), "pack_input_handshakes", tuple(input_request_signals),
+        ))
+    formals[join_instance.id] = ("input_req", "input_ack", "stage_release", "stage_active")
     parameters[join_instance.id] = ("N",)
     bind(join_instance, "input_req", join_request)
     bind(join_instance, "input_ack", join_acknowledge)
     bind(join_instance, "stage_release", stage_complete)
-    bind(join_instance, "control", join_control)
+    bind(join_instance, "stage_active", join_control)
     parameter_bindings.append(BoundAsyncParameterBinding(join_instance.id, "N", input_count))
 
     storage_by_output = {slot.retained_until: slot for slot in architecture.storage.slots}
@@ -397,15 +451,19 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
                                ("stage_release", stage_complete)):
             bind(storage, formal, actual)
         parameter_bindings.append(BoundAsyncParameterBinding(storage.id, "WIDTH", payload.width))
-        assignments.append(BoundAsyncAssignment(data_in, operation.value, slot.body_send, "body_send_payload"))
+        assignments.append(BoundAsyncAssignment(
+            data_in, operation.value, slot.body_send, "body_send_payload", expression_signals(operation.value),
+        ))
 
-    for index, operation in enumerate(architecture.combinational.operations):
+    for operation in architecture.combinational.operations:
         if isinstance(operation.operation, behavioral.Assign):
-            payload = behavioral.expression_payload_type(operation.operation.value)
-            width = payload.width if payload is not None else behavioral.ONE_BIT
-            target = ensure(f"combinational_{index}_value", "payload", width)
-            assignments.append(BoundAsyncAssignment(target, operation.operation.value, operation,
-                                                    "body_combinational"))
+            target = _target_variable(operation.operation.target)
+            if target is None:
+                raise AsyncTemplateBindingError("assignment target has no Variable identity")
+            assignments.append(BoundAsyncAssignment(
+                variable_signal(target), operation.operation.value, operation, "body_combinational",
+                expression_signals(operation.operation.value),
+            ))
 
     fork = architecture.output_fork
     fork_instance = next(instance for instance in instances if instance.template == "four_phase_output_fork")
@@ -420,58 +478,74 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
         fork_complete_vector if not post_input_channels else
         ensure("stage_output_complete", "completion", completion_count)
     )
+    raw_output_launch: dict[OutputPort, str] = {}
     output_launch: dict[OutputPort, str] = {}
-    output_complete: dict[OutputPort, str] = {}
+    body_completion_ids: list[str] = []
+    body_completion_sources: list[object] = []
     for index, output in enumerate(fork.outputs):
         operation = output.body_send.source.operation
         assert isinstance(operation, behavioral.Send)
         payload = _send_payload_type(operation)
         slot = storage_by_output[output]
+        raw_launch = raw_output_launch[output] = ensure(
+            f"output_{index}_raw_launch", "request", behavioral.ONE_BIT,
+        )
         launch = output_launch[output] = ensure(f"output_{index}_launch", "request", behavioral.ONE_BIT)
-        complete = output_complete[output] = ensure(f"output_{index}_complete", "completion", behavioral.ONE_BIT)
+        external_req = external(operation.channel, "send", "request")
+        external_ack = external(operation.channel, "send", "acknowledge")
+        external_data = external(operation.channel, "send", "payload")
         if output.en_send is None:
-            branch = by_source[output]
-            formals[branch.id] = ("external_req", "external_ack", "payload", "launch", "complete")
-            for formal, actual in (
-                ("external_req", external(operation.channel, "send", "request")),
-                ("external_ack", external(operation.channel, "send", "acknowledge")),
-                ("payload", storage_data_out[slot]),
-                ("launch", launch), ("complete", complete),
-            ):
-                bind(branch, formal, actual)
+            complete = ensure(f"output_{index}_complete", "completion", behavioral.ONE_BIT)
+            assignments.extend((
+                BoundAsyncAssignment(external_req, None, output, "signal_copy", (launch,)),
+                BoundAsyncAssignment(external_data, None, output, "signal_copy", (storage_data_out[slot],)),
+                BoundAsyncAssignment(complete, None, output, "signal_copy", (external_ack,)),
+            ))
+            body_completion_ids.append(complete)
+            body_completion_sources.append(output)
         else:
             stage = next(item for item in architecture.en_send_stages if item.output_port is output)
             stage_instance = by_source[stage]
-            body_req = ensure(f"output_{index}_body_req", "request", behavioral.ONE_BIT)
+            body_req = launch
             body_ack = ensure(f"output_{index}_body_ack", "acknowledge", behavioral.ONE_BIT)
             enable_req, enable_ack, enable_data = enable_signals[stage.enable_channel]
             formals[stage_instance.id] = (
                 "enable_req", "enable_ack", "enable_data", "body_req", "body_ack", "body_data",
                 "external_req", "external_ack", "external_data",
             )
+            parameters[stage_instance.id] = ("WIDTH",)
+            parameter_bindings.append(BoundAsyncParameterBinding(stage_instance.id, "WIDTH", payload.width))
             for formal, actual in (
                 ("enable_req", enable_req), ("enable_ack", enable_ack), ("enable_data", enable_data),
                 ("body_req", body_req), ("body_ack", body_ack),
                 ("body_data", storage_data_out[slot]),
-                ("external_req", external(operation.channel, "send", "request")),
-                ("external_ack", external(operation.channel, "send", "acknowledge")),
-                ("external_data", external(operation.channel, "send", "payload")),
+                ("external_req", external_req), ("external_ack", external_ack),
+                ("external_data", external_data),
             ):
                 bind(stage_instance, formal, actual)
-        assignments.append(BoundAsyncAssignment(launch, None, output, "unpack_output_launch"))
-        assignments.append(BoundAsyncAssignment(fork_complete_vector, None, output, "pack_output_completion"))
-        if post_input_channels:
-            assignments.append(BoundAsyncAssignment(completion_vector, None, output, "pack_output_completion"))
-    for channel in post_input_channels:
-        assignments.append(BoundAsyncAssignment(completion_vector, None, channel, "pack_output_completion"))
-    formals[fork_instance.id] = ("launch", "complete", "stage_complete")
+            body_completion_ids.append(body_ack)
+            body_completion_sources.append(stage)
+        assignments.append(BoundAsyncAssignment(
+            raw_launch, None, output, "unpack_output_launch", (fork_launch_vector,),
+            index if len(fork.outputs) > 1 else None,
+        ))
+    assignments.append(BoundAsyncAssignment(
+        fork_complete_vector, None, tuple(body_completion_sources), "pack_output_completion",
+        tuple(body_completion_ids),
+    ))
+    if post_input_channels:
+        post_completion_ids = tuple(enable_signals[channel][1] for channel in post_input_channels)
+        assignments.append(BoundAsyncAssignment(
+            completion_vector, None, tuple((*body_completion_sources, *post_input_channels)),
+            "pack_output_completion", tuple((*body_completion_ids, *post_completion_ids)),
+        ))
+    formals[fork_instance.id] = ("stage_active", "launch")
     formals[completion_instance.id] = ("complete", "stage_release")
     parameters[fork_instance.id] = ("M",)
     parameters[completion_instance.id] = ("M",)
+    bind(fork_instance, "stage_active", join_control)
     bind(fork_instance, "launch", fork_launch_vector)
-    bind(fork_instance, "complete", fork_complete_vector)
     bind(completion_instance, "complete", completion_vector)
-    bind(fork_instance, "stage_complete", stage_complete)
     bind(completion_instance, "stage_release", stage_complete)
     parameter_bindings.append(BoundAsyncParameterBinding(fork_instance.id, "M", output_count))
     parameter_bindings.append(BoundAsyncParameterBinding(completion_instance.id, "M", completion_count))
@@ -479,7 +553,7 @@ def _typed_bindings(architecture: AsyncMicroarchitecture, instances: list[BoundA
     for requirement in architecture.matched_delays:
         delay = by_source[requirement]
         formals[delay.id] = ("control_in", "control_out")
-        bind(delay, "control_in", join_control)
+        bind(delay, "control_in", raw_output_launch[requirement.output_port])
         bind(delay, "control_out", output_launch[requirement.output_port])
 
     updated = [replace(instance, component=instance.template,
@@ -531,6 +605,10 @@ def _selector_name(expression: behavioral.Expression) -> str:
     if expression.variable is not None:
         return expression.variable.name
     return expression.form
+
+
+def _target_variable(target: behavioral.Variable | behavioral.Expression) -> behavioral.Variable | None:
+    return target if isinstance(target, behavioral.Variable) else target.variable
 
 
 def _receive_payload_type(operation: behavioral.Receive) -> behavioral.PayloadType:

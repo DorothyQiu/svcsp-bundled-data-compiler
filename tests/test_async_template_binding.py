@@ -1,6 +1,8 @@
 """M7A structural-binding contract tests for the M6 async architecture."""
 from __future__ import annotations
 
+import pytest
+
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
 from svcsp_compiler.async_template_binding import BoundAsyncModule, bind_async_templates
 from svcsp_compiler.behavioral_ir import (
@@ -78,6 +80,12 @@ def _actual_signal(bound: BoundAsyncModule, binding):
 
 def _enable_channel_binding(bound: BoundAsyncModule, channel):
     return next(item for item in bound.enable_channels if item.source is channel)
+
+
+def _variable_signal_id(bound: BoundAsyncModule, variable: Variable) -> str:
+    bindings = [item for item in bound.variable_bindings if item.variable is variable]
+    assert len(bindings) == 1
+    return bindings[0].signal_id
 
 
 def _assert_complete_typed_bindings(bound: BoundAsyncModule) -> None:
@@ -340,12 +348,19 @@ def test_join_output_and_completion_handshakes_are_declared_and_bound() -> None:
     assert all(_actual_signal(bound, join_bindings[name]).kind in {"request", "acknowledge", "control"}
                for name in join_bindings)
 
-    for output in architecture.output_fork.outputs:
-        branch = _bound_for(bound, output)
-        branch_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, branch)}
-        assert {"external_req", "external_ack", "payload", "launch", "complete"} <= set(branch_bindings)
-        assert _actual_signal(bound, branch_bindings["external_req"]).kind == "request"
-        assert _actual_signal(bound, branch_bindings["external_ack"]).kind == "acknowledge"
+    for index, output in enumerate(architecture.output_fork.outputs):
+        endpoint = output.body_send.source.operation.channel
+        external_request = next(port.signal_id for port in bound.module_ports
+                                if port.endpoint is endpoint and port.flow == "send_request")
+        external_acknowledge = next(port.signal_id for port in bound.module_ports
+                                    if port.endpoint is endpoint and port.flow == "send_acknowledge")
+        assert any(assignment.target_signal_id == external_request and
+                   assignment.source_signal_ids == (f"output_{index}_launch",)
+                   for assignment in bound.assignments)
+        assert any(assignment.target_signal_id == f"output_{index}_complete" and
+                   assignment.source_signal_ids == (external_acknowledge,)
+                   for assignment in bound.assignments)
+        assert not any(instance.source is output for instance in bound.instances)
 
     completion = next(instance for instance in bound.instances if instance.template == "four_phase_output_completion")
     completion_bindings = {binding.formal_name: binding for binding in _bindings_for(bound, completion)}
@@ -418,8 +433,8 @@ def test_output_fork_and_completion_use_parameterized_vector_branch_controls() -
     assert fork_parameters["M"].bits == 2
     assert completion_parameters["M"].bits == 2
     assert _actual_signal(bound, fork_bindings["launch"]).width.bits == 2
-    assert _actual_signal(bound, fork_bindings["complete"]).width.bits == 2
     assert _actual_signal(bound, completion_bindings["complete"]).width.bits == 2
+    assert set(fork_bindings) == {"stage_active", "launch"}
     assert not any(name.startswith("launch_") or name.startswith("complete_") for name in fork_bindings)
 
 
@@ -442,9 +457,83 @@ def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() 
     assert any(assignment.source is body_send and assignment.expression is body_send.source.operation.value
                and assignment.target_signal_id == storage_bindings["data_in"].actual_signal_id
                for assignment in bound.assignments)
-    output = _bound_for(bound, architecture.output_fork.outputs[0])
-    output_bindings = {item.formal_name: item for item in _bindings_for(bound, output)}
-    assert output_bindings["payload"].actual_signal_id == storage_bindings["data_out"].actual_signal_id
+    endpoint = architecture.output_fork.outputs[0].body_send.source.operation.channel
+    external_payload = next(port.signal_id for port in bound.module_ports
+                            if port.endpoint is endpoint and port.flow == "send")
+    assert any(assignment.target_signal_id == external_payload and
+               assignment.source_signal_ids == (storage_bindings["data_out"].actual_signal_id,)
+               for assignment in bound.assignments)
+
+
+def test_receive_target_has_one_exact_variable_binding_driven_by_body_receive_data() -> None:
+    program = _Program()
+    received = program.variable("a", _BYTE)
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a", _BYTE),
+        program.send("B", program.name("a"), _BYTE),
+    )))
+
+    signal_id = _variable_signal_id(bound, received)
+    signal = next(item for item in bound.signals if item.id == signal_id)
+    input_port = architecture.input_join.inputs[0]
+    receive_payload = next(port.signal_id for port in bound.module_ports
+                           if port.endpoint is input_port.body_receive.source.operation.channel and
+                           port.flow == "receive")
+    send_assignment = next(assignment for assignment in bound.assignments
+                           if assignment.source is architecture.output_fork.outputs[0].body_send)
+
+    assert signal.width == received.payload_type.width
+    assert any(assignment.target_signal_id == signal_id and
+               assignment.source_signal_ids == (receive_payload,)
+               for assignment in bound.assignments)
+    assert signal_id in send_assignment.source_signal_ids
+
+
+def test_assignment_targets_and_rhs_use_distinct_exact_variable_bindings() -> None:
+    program = _Program()
+    received = program.variable("a")
+    assigned = program.variable("y")
+    expression = Expression("binary", operator="+", operands=(
+        program.name("a"), Expression("literal", value="1'b1"),
+    ))
+    assignment = Assign(assigned, expression)
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        assignment,
+        program.send("B", program.name("y")),
+    )))
+
+    received_signal = _variable_signal_id(bound, received)
+    assigned_signal = _variable_signal_id(bound, assigned)
+    receive_payload = next(port.signal_id for port in bound.module_ports
+                           if port.flow == "receive")
+    combinational = next(item for item in bound.assignments if item.source is architecture.combinational.operations[0])
+    send_assignment = next(assignment for assignment in bound.assignments
+                           if assignment.source is architecture.output_fork.outputs[0].body_send)
+
+    assert received_signal != assigned_signal
+    assert any(item.target_signal_id == received_signal and item.source_signal_ids == (receive_payload,)
+               for item in bound.assignments)
+    assert combinational.target_signal_id == assigned_signal
+    assert received_signal in combinational.source_signal_ids
+    assert assigned_signal in send_assignment.source_signal_ids
+
+
+def test_distinct_behavioral_variable_identities_never_alias_by_source_spelling() -> None:
+    left = Variable("a", ("left",), SourceLocation("async_binding.sv", 1, 1), _ONE_BIT)
+    right = Variable("a", ("right",), SourceLocation("async_binding.sv", 2, 1), _ONE_BIT)
+    module = BehavioralModule("distinct_variables", Sequence((
+        Receive(ChannelEndpoint("A", payload_type=_ONE_BIT), left),
+        Receive(ChannelEndpoint("B", payload_type=_ONE_BIT), right),
+        Send(ChannelEndpoint("C", payload_type=_ONE_BIT), Expression("literal", value="1'b0")),
+    )), (), (left, right))
+    architecture = lower_microarchitecture(analyze_semantics(decompose_transaction(extract_transaction(module))))
+    bound = bind_async_templates(architecture)
+
+    left_signal = _variable_signal_id(bound, left)
+    right_signal = _variable_signal_id(bound, right)
+    assert left_signal != right_signal
+    assert {left_signal, right_signal} <= {signal.id for signal in bound.signals}
 
 
 def test_enable_payload_is_driven_by_its_exact_m4_condition_not_a_scalar_wire() -> None:
@@ -493,7 +582,7 @@ def test_pre_input_enable_sender_has_a_dedicated_transaction_launch_and_value_pa
     join_bindings = {item.formal_name: item
                      for item in _bindings_for(bound, _bound_for(bound, architecture.input_join))}
     assert value != data
-    assert launch != join_bindings["control"].actual_signal_id
+    assert launch != join_bindings["stage_active"].actual_signal_id
     assert _actual_signal(bound, bindings["launch"]).kind == "control"
     assert any(assignment.target_signal_id == value and assignment.expression is channel.enable.condition
                for assignment in bound.assignments)
@@ -514,13 +603,15 @@ def test_post_input_enable_sender_launches_with_body_and_adds_an_independent_com
     channel = next(item for item in architecture.enable_channels if item.availability.value == "post_input")
     sender = _enable_channel_binding(bound, channel).body_sender
     bindings = {item.formal_name: item for item in _bindings_for(bound, sender)}
+    stage_bindings = {item.formal_name: item
+                      for item in _bindings_for(bound, _bound_for(bound, architecture.en_send_stages[0]))}
     join = _bound_for(bound, architecture.input_join)
     join_bindings = {item.formal_name: item for item in _bindings_for(bound, join)}
     completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
     completion_bindings = {item.formal_name: item for item in _bindings_for(bound, completion)}
 
     assert set(bindings) == {"value", "launch", "req", "ack", "data"}
-    assert bindings["launch"].actual_signal_id == join_bindings["control"].actual_signal_id
+    assert bindings["launch"].actual_signal_id == join_bindings["stage_active"].actual_signal_id
     assert bindings["value"].actual_signal_id != bindings["data"].actual_signal_id
     assert any(assignment.target_signal_id == bindings["value"].actual_signal_id
                and assignment.expression is channel.enable.condition for assignment in bound.assignments)
@@ -529,8 +620,90 @@ def test_post_input_enable_sender_launches_with_body_and_adds_an_independent_com
 
     completion_vector = _actual_signal(bound, completion_bindings["complete"])
     assert completion_vector.width.bits == 2
-    assert any(assignment.kind == "pack_output_completion" and assignment.source is channel
-               and assignment.target_signal_id == completion_bindings["complete"].actual_signal_id
-               for assignment in bound.assignments)
+    completion_assignment = next(assignment for assignment in bound.assignments
+                                 if assignment.kind == "pack_output_completion" and
+                                 assignment.target_signal_id == completion_bindings["complete"].actual_signal_id)
+    assert completion_assignment.source == (architecture.en_send_stages[0], channel)
+    assert completion_assignment.source_signal_ids == (
+        stage_bindings["body_ack"].actual_signal_id,
+        bindings["ack"].actual_signal_id,
+    )
     assert len({item.actual_signal_id for item in _bindings_for(bound, sender)
                 if item.formal_name == "launch"}) == 1
+
+
+def test_pre_input_enable_launch_is_explicit_transaction_entry_control() -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    channel = next(item for item in architecture.enable_channels if item.availability.value == "pre_input")
+    enable = _enable_channel_binding(bound, channel)
+    sender_bindings = {item.formal_name: item for item in _bindings_for(bound, enable.body_sender)}
+    join = _bound_for(bound, architecture.input_join)
+    join_control = next(item.actual_signal_id for item in _bindings_for(bound, join)
+                        if item.formal_name == "stage_active")
+    launch = sender_bindings["launch"].actual_signal_id
+    drivers = [item for item in bound.assignments if item.target_signal_id == launch]
+
+    assert launch == enable.launch_signal_id
+    assert launch != join_control
+    assert len(drivers) == 1
+    assert drivers[0].kind == "transaction_entry_launch"
+    assert drivers[0].source is architecture.validated
+    assert not any(item.source is channel for item in drivers)
+
+
+@pytest.mark.parametrize("payload", (_ONE_BIT, _BYTE))
+def test_en_stages_bind_widths_from_their_exact_payloads(payload: PayloadType) -> None:
+    program = _Program()
+    select = program.name("select")
+    architecture, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a", payload), Skip()),
+        If(select, program.send("B", program.name("a"), payload), Skip()),
+    )))
+
+    for stage in (*architecture.en_receive_stages, *architecture.en_send_stages):
+        instance = _bound_for(bound, stage)
+        width = next(item.value for item in bound.parameter_bindings
+                     if item.instance_id == instance.id and item.formal_name == "WIDTH")
+        endpoint = (
+            stage.body_receive.source.operation.channel
+            if hasattr(stage, "body_receive") else stage.body_send.source.operation.channel
+        )
+        assert width == endpoint.payload_type.width
+
+
+def test_conditional_send_completion_has_real_body_and_enable_handshake_lanes() -> None:
+    program = _Program()
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+    )))
+
+    stage = architecture.en_send_stages[0]
+    stage_instance = _bound_for(bound, stage)
+    stage_bindings = {item.formal_name: item for item in _bindings_for(bound, stage_instance)}
+    channel = stage.enable_channel
+    enable_sender = _enable_channel_binding(bound, channel).body_sender
+    completion = next(item for item in bound.instances if item.template == "four_phase_output_completion")
+    completion_vector = next(item.actual_signal_id for item in _bindings_for(bound, completion)
+                             if item.formal_name == "complete")
+    completion_signal = next(item for item in bound.signals if item.id == completion_vector)
+    drivers = [item for item in bound.assignments if item.target_signal_id == completion_vector]
+
+    assert completion_signal.width.bits == len(architecture.output_fork.outputs) + 1
+    assert stage_bindings["body_req"].actual_signal_id == "output_0_launch"
+    assert stage_bindings["body_ack"].actual_signal_id != "output_0_complete"
+    assert any(item.formal_name == "ack" for item in _bindings_for(bound, enable_sender))
+    assert len(drivers) == 1
+    assert drivers[0].kind == "pack_output_completion"
+    assert drivers[0].source == (stage, channel)
+    assert drivers[0].source_signal_ids == (
+        stage_bindings["body_ack"].actual_signal_id,
+        next(item.actual_signal_id for item in _bindings_for(bound, enable_sender)
+             if item.formal_name == "ack"),
+    )

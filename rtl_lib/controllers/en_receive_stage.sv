@@ -34,7 +34,18 @@ module en_receive_stage #(
                     enabled = enable_data;
                     enable_ack = 1'b1;
                     if (enable_data) begin
-                        state = WAIT_EXTERNAL;
+                        // An external sender may already have raised its
+                        // request before this enable token is consumed.
+                        // Accept that request in the same transition rather
+                        // than waiting for a second edge that will not come.
+                        if (external_req) begin
+                            body_data = external_data;
+                            external_ack = 1'b1;
+                            body_req = 1'b1;
+                            state = WAIT_BODY;
+                        end else begin
+                            state = WAIT_EXTERNAL;
+                        end
                     end else begin
                         body_data = {WIDTH{1'b0}};
                         body_req = 1'b1;
