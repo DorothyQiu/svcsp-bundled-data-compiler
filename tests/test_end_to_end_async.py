@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from svcsp_compiler import compile_async_file
+from svcsp_compiler import SemanticValidationError, compile_async_file
 from svcsp_compiler.transaction import TransactionStructureError
 
 
@@ -63,6 +63,7 @@ def test_target_fixture_compiles_through_the_complete_async_flow(tmp_path: Path)
     )
     assert compile_result.returncode == 0, compile_result.stderr
 
+
 @pytest.mark.parametrize(('source_text', 'expected'), (
     ('''module parallel(interface A, B, C); logic x, y; always begin fork
 A.Receive(x); B.Receive(y); join C.Send(x); end endmodule''', '.N(2)'),
@@ -84,4 +85,20 @@ def test_target_entrypoint_rejects_receive_after_send(tmp_path: Path) -> None:
     source.write_text('''module unsupported(interface A, B); logic x, y; always begin
 A.Receive(x); B.Send(x); A.Receive(y); end endmodule''')
     with pytest.raises(TransactionStructureError, match='Receive occurs after'):
+        compile_async_file(source)
+
+
+def test_target_entrypoint_rejects_invalid_conditional_receive_data_use(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'invalid_conditional_receive.sv'
+    source.write_text('''module invalid_conditional_receive(interface A, B);
+logic select, x;
+always begin
+if (select) A.Receive(x);
+B.Send(x);
+end
+endmodule''')
+
+    with pytest.raises(SemanticValidationError, match='conditional receive data'):
         compile_async_file(source)
