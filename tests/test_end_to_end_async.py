@@ -69,7 +69,7 @@ def test_target_fixture_compiles_through_the_complete_async_flow(tmp_path: Path)
 A.Receive(x); B.Receive(y); join C.Send(x); end endmodule''', '.N(2)'),
     ('''module fanout(interface A, B, C); logic x; always begin
 A.Receive(x); B.Send(x); C.Send(x); end endmodule''', '.M(2)'),
-    ('''module conditional(interface A, B); logic c, x; always begin
+    ('''module conditional(input logic c, interface A, B); logic x; always begin
 A.Receive(x); if (c) B.Send(x); end endmodule''', 'en_send_controller'),
 ))
 def test_target_entrypoint_accepts_supported_transaction_topologies(
@@ -92,8 +92,8 @@ def test_target_entrypoint_rejects_invalid_conditional_receive_data_use(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / 'invalid_conditional_receive.sv'
-    source.write_text('''module invalid_conditional_receive(interface A, B);
-logic select, x;
+    source.write_text('''module invalid_conditional_receive(input logic select, interface A, B);
+logic x;
 always begin
 if (select) A.Receive(x);
 B.Send(x);

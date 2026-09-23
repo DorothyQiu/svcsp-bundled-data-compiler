@@ -42,6 +42,7 @@ class _Program:
     def __init__(self, module_name: str) -> None:
         self.module_name = module_name
         self.variables: dict[str, Variable] = {}
+        self.external_inputs: dict[str, Variable] = {}
 
     def variable(self, name: str, payload_type: PayloadType = _BIT) -> Variable:
         return self.variables.setdefault(
@@ -50,6 +51,14 @@ class _Program:
 
     def name(self, name: str, payload_type: PayloadType = _BIT) -> Expression:
         return Expression("name", value=name, variable=self.variable(name, payload_type))
+
+    def external_name(self, name: str, payload_type: PayloadType = _BIT) -> Expression:
+        if name in self.variables:
+            raise ValueError(f"{name} is already a local variable")
+        variable = self.external_inputs.setdefault(
+            name, Variable(name, (), SourceLocation("generated_rtl.sv", 1, 1), payload_type),
+        )
+        return Expression("name", value=name, variable=variable)
 
     def literal(self, value: str) -> Expression:
         return Expression("literal", value=value)
@@ -61,7 +70,10 @@ class _Program:
         return Send(ChannelEndpoint(channel, payload_type=payload_type), value)
 
     def emit(self, body) -> str:
-        behavioral = BehavioralModule(self.module_name, body, (), tuple(self.variables.values()))
+        behavioral = BehavioralModule(
+            self.module_name, body, (), tuple(self.variables.values()),
+            external_inputs=tuple(self.external_inputs.values()),
+        )
         transaction = extract_transaction(behavioral)
         decomposed = decompose_transaction(transaction)
         architecture = lower_microarchitecture(analyze_semantics(decomposed))
@@ -360,7 +372,7 @@ endmodule
 
 def test_generated_conditional_input_output_selection_rearms_with_changed_enable(tmp_path: Path) -> None:
     program = _Program("generated_conditional_selection")
-    select = program.name("sel")
+    select = program.external_name("sel")
     a = program.name("a", _BYTE)
     b = program.name("b", _BYTE)
     y = program.name("y", _BYTE)
@@ -373,6 +385,7 @@ def test_generated_conditional_input_output_selection_rearms_with_changed_enable
     _simulate_generated(tmp_path, "generated_conditional_selection", rtl, """
 module tb;
   reg reset_n = 0;
+  reg sel = 0;
   reg channel_A_receive_request = 0, channel_B_receive_request = 0;
   reg [7:0] channel_A_receive_payload = 0, channel_B_receive_payload = 0;
   reg channel_C_send_acknowledge = 0, channel_D_send_acknowledge = 0;
@@ -381,7 +394,7 @@ module tb;
   wire [7:0] channel_C_send_payload, channel_D_send_payload;
   generated_conditional_selection dut (.*);
   initial begin
-    dut.body_var_0_sel = 1'b1;
+    sel = 1'b1;
     #1; reset_n = 1'b1;
   end
   task transaction(input select, input [7:0] value, input next_select);
@@ -395,7 +408,7 @@ module tb;
         wait (channel_C_send_request);
         if (channel_C_send_payload !== value || channel_D_send_request)
           $fatal(1, "selected C transaction");
-        dut.body_var_0_sel = next_select;
+        sel = next_select;
         #1;
         channel_C_send_acknowledge = 1'b1;
         wait (!channel_C_send_request);
@@ -409,7 +422,7 @@ module tb;
         wait (channel_D_send_request);
         if (channel_D_send_payload !== value || channel_C_send_request)
           $fatal(1, "selected D transaction");
-        dut.body_var_0_sel = next_select;
+        sel = next_select;
         #1;
         channel_D_send_acknowledge = 1'b1;
         wait (!channel_D_send_request);
@@ -432,8 +445,8 @@ endmodule
 
 def test_generated_nested_conditionals_honor_effective_enable_conditions(tmp_path: Path) -> None:
     program = _Program("generated_nested_conditions")
-    x = program.name("x")
-    y = program.name("y")
+    x = program.external_name("x")
+    y = program.external_name("y")
     rtl = program.emit(Sequence((
         If(x,
            If(y, program.receive("A", "a"), program.receive("B", "b")),
@@ -446,6 +459,7 @@ def test_generated_nested_conditionals_honor_effective_enable_conditions(tmp_pat
     _simulate_generated(tmp_path, "generated_nested_conditions", rtl, """
 module tb;
   reg reset_n = 0;
+  reg x = 0, y = 0;
   reg channel_A_receive_request = 0, channel_B_receive_request = 0, channel_C_receive_request = 0;
   reg channel_A_receive_payload = 0, channel_B_receive_payload = 0, channel_C_receive_payload = 0;
   reg channel_D_send_acknowledge = 0, channel_E_send_acknowledge = 0, channel_F_send_acknowledge = 0;
@@ -454,8 +468,8 @@ module tb;
   wire channel_D_send_payload, channel_E_send_payload, channel_F_send_payload;
   generated_nested_conditions dut (.*);
   initial begin
-    dut.body_var_0_x = 1'b1;
-    dut.body_var_1_y = 1'b1;
+    x = 1'b1;
+    y = 1'b1;
     #1; reset_n = 1'b1;
   end
   task transaction(input [1:0] branch, input next_x, input next_y);
@@ -470,7 +484,7 @@ module tb;
           wait (channel_D_send_request);
           if (!channel_D_send_payload || channel_E_send_request || channel_F_send_request)
             $fatal(1, "x && y selected wrong send");
-          dut.body_var_0_x = next_x; dut.body_var_1_y = next_y; #1;
+          x = next_x; y = next_y; #1;
           channel_D_send_acknowledge = 1'b1; wait (!channel_D_send_request);
           channel_D_send_acknowledge = 1'b0;
         end
@@ -483,7 +497,7 @@ module tb;
           wait (channel_E_send_request);
           if (!channel_E_send_payload || channel_D_send_request || channel_F_send_request)
             $fatal(1, "x && !y selected wrong send");
-          dut.body_var_0_x = next_x; dut.body_var_1_y = next_y; #1;
+          x = next_x; y = next_y; #1;
           channel_E_send_acknowledge = 1'b1; wait (!channel_E_send_request);
           channel_E_send_acknowledge = 1'b0;
         end
@@ -496,7 +510,7 @@ module tb;
           wait (channel_F_send_request);
           if (!channel_F_send_payload || channel_D_send_request || channel_E_send_request)
             $fatal(1, "!x selected wrong send");
-          dut.body_var_0_x = next_x; dut.body_var_1_y = next_y; #1;
+          x = next_x; y = next_y; #1;
           channel_F_send_acknowledge = 1'b1; wait (!channel_F_send_request);
           channel_F_send_acknowledge = 1'b0;
         end

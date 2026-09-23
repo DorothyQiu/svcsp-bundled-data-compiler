@@ -174,7 +174,11 @@ def bind_async_templates(
         width: behavioral.PayloadWidth,
         endpoint: behavioral.ChannelEndpoint | None = None,
     ) -> str:
-        if not any(item.id == name for item in signals):
+        existing = [item for item in signals if item.id == name]
+        if existing:
+            if len(existing) != 1 or existing[0] != BoundAsyncSignal(name, kind, width, endpoint):
+                raise AsyncTemplateBindingError(f"conflicting bound signal {name}")
+        else:
             signals.append(BoundAsyncSignal(name, kind, width, endpoint))
         return name
 
@@ -223,6 +227,9 @@ def bind_async_templates(
     ) -> str:
         name = f"channel_{_endpoint_name(endpoint)}_{flow}_{role}"
 
+        if any(port.name == name for port in ports):
+            raise AsyncTemplateBindingError(f"duplicate or conflicting public port {name}")
+
         ensure(
             name,
             "payload" if role == "payload" else role,
@@ -244,6 +251,26 @@ def bind_async_templates(
 
         return name
 
+    def external_input(variable: behavioral.Variable) -> str:
+        """Bind one declared external-input identity to its public RTL port."""
+
+        name = variable.name
+        if any(port.name == name for port in ports):
+            raise AsyncTemplateBindingError(f"duplicate or conflicting public port {name}")
+        ensure(name, "payload", variable.payload_type.width)
+        ports.append(
+            BoundAsyncModulePort(
+                name,
+                "external_input",
+                "payload",
+                "input",
+                None,
+                variable.payload_type.width,
+                name,
+            )
+        )
+        return name
+
     reset_n = ensure(
         "reset_n",
         "control",
@@ -263,10 +290,17 @@ def bind_async_templates(
     )
 
     variables: list[BoundAsyncVariableBinding] = []
+    behavioral_module = architecture.validated.decomposed.transaction.behavioral
+    external_inputs = behavioral_module.external_inputs
+
+    for variable in external_inputs:
+        variables.append(BoundAsyncVariableBinding(variable, external_input(variable)))
 
     for index, variable in enumerate(
-        architecture.validated.decomposed.transaction.behavioral.variables
+        behavioral_module.variables
     ):
+        if any(variable is external for external in external_inputs):
+            continue
         name = (
             f"body_var_{index}_"
             f"{_IDENTIFIER.sub('_', variable.name) or 'variable'}"
@@ -987,6 +1021,7 @@ def bind_async_templates(
                 channel.enable.condition,
                 channel.enable,
                 "enable_value",
+                expression_signals(channel.enable.condition),
             )
         )
 

@@ -33,14 +33,23 @@ _BYTE = PayloadType("logic", width=PayloadWidth(bits=8))
 class _Program:
     def __init__(self) -> None:
         self.variables: dict[str, Variable] = {}
+        self.external_inputs: dict[str, Variable] = {}
 
     def variable(self, name: str, payload_type: PayloadType = _ONE_BIT) -> Variable:
         return self.variables.setdefault(
             name, Variable(name, (), SourceLocation("async_binding.sv", 1, 1), payload_type),
         )
 
-    def name(self, name: str) -> Expression:
-        variable = self.variable(name)
+    def name(self, name: str, payload_type: PayloadType = _ONE_BIT) -> Expression:
+        variable = self.variable(name, payload_type)
+        return Expression("name", value=name, variable=variable)
+
+    def external_name(self, name: str, payload_type: PayloadType = _ONE_BIT) -> Expression:
+        if name in self.variables:
+            raise ValueError(f"{name} is already a local variable")
+        variable = self.external_inputs.setdefault(
+            name, Variable(name, (), SourceLocation("async_binding.sv", 1, 1), payload_type),
+        )
         return Expression("name", value=name, variable=variable)
 
     def receive(self, channel: ChannelEndpoint | str, target: str, payload_type: PayloadType = _ONE_BIT) -> Receive:
@@ -53,7 +62,10 @@ class _Program:
         return Send(endpoint, value)
 
     def module(self, body) -> BehavioralModule:
-        return BehavioralModule("async_binding", body, (), tuple(self.variables.values()))
+        return BehavioralModule(
+            "async_binding", body, (), tuple(self.variables.values()),
+            external_inputs=tuple(self.external_inputs.values()),
+        )
 
 
 def _architecture(program: _Program, body):
@@ -184,7 +196,7 @@ def test_2r2s_preserves_every_m6_input_output_and_storage_identity() -> None:
 
 def test_every_m6_enable_channel_binds_a_real_one_bit_four_phase_channel_and_body_sender() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture, bound = _bind(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -211,7 +223,7 @@ def test_every_m6_enable_channel_binds_a_real_one_bit_four_phase_channel_and_bod
 
 def test_conditional_receive_binds_its_explicit_m6_storage_and_delay_resources() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture, bound = _bind(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -248,7 +260,7 @@ def test_conditional_send_binds_its_explicit_m6_storage_and_delay_resources() ->
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), program.send("B", Expression("literal", value="1'b0")), Skip()),
+        If(program.external_name("select"), program.send("B", Expression("literal", value="1'b0")), Skip()),
     )))
 
     stage = architecture.en_send_stages[0]
@@ -352,7 +364,7 @@ def test_every_instance_has_complete_typed_formal_and_parameter_bindings() -> No
 
 def test_conditional_en_receive_uses_the_m6_microstage_and_enable_channel_bindings() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     conditional_receive = program.receive("A", "a")
     architecture, bound = _bind(program, Sequence((
         If(select, conditional_receive, Skip()),
@@ -411,7 +423,7 @@ def test_post_input_enable_is_not_an_ordinary_output_port_and_matched_delays_rem
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
         Assign(program.variable("y"), expression),
-        If(program.name("select"), conditional_send, Skip()),
+        If(program.external_name("select"), conditional_send, Skip()),
         program.send("C", program.name("y")),
     )))
 
@@ -566,9 +578,56 @@ def test_distinct_behavioral_variable_identities_never_alias_by_source_spelling(
     assert {left_signal, right_signal} <= {signal.id for signal in bound.signals}
 
 
+def test_external_input_binds_to_an_exact_public_signal_not_a_body_variable() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    _, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, program.send("B", program.name("a")), Skip()),
+    )))
+
+    binding = next(item for item in bound.variable_bindings if item.variable is select.variable)
+    port = next(item for item in bound.module_ports if item.name == "select")
+
+    assert binding.variable is select.variable
+    assert binding.signal_id == port.signal_id == "select"
+    assert port.direction == "input"
+    assert not any(signal.id.startswith("body_var_") and signal.id.endswith("_select")
+                   for signal in bound.signals)
+    assert any(signal.id.startswith("body_var_") and signal.id.endswith("_a")
+               for signal in bound.signals)
+
+
+def test_packed_external_input_preserves_its_public_port_width() -> None:
+    program = _Program()
+    select = program.external_name("select", _BYTE)
+    _, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    )))
+
+    port = next(item for item in bound.module_ports if item.name == "select")
+    assert port.width == _BYTE.width
+    assert next(signal for signal in bound.signals if signal.id == "select").width == _BYTE.width
+
+
+def test_pre_input_enable_expression_reads_the_public_external_signal() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    architecture, bound = _bind(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    )))
+
+    channel = next(item for item in architecture.enable_channels if item.availability.value == "pre_input")
+    value_assignment = next(item for item in bound.assignments
+                            if item.expression is channel.enable.condition)
+    assert value_assignment.source_signal_ids == ("select",)
+
+
 def test_enable_payload_is_driven_by_its_exact_m4_condition_not_a_scalar_wire() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture, bound = _bind(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -594,7 +653,7 @@ def test_enable_payload_is_driven_by_its_exact_m4_condition_not_a_scalar_wire() 
 
 def test_pre_input_enable_sender_has_a_dedicated_transaction_launch_and_value_path() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture, bound = _bind(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -624,7 +683,7 @@ def test_post_input_enable_sender_launches_with_body_and_preserves_enable_comple
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+        If(program.external_name("select"), program.send("B", program.name("a")), Skip()),
     )))
 
     channel = next(item for item in architecture.enable_channels if item.availability.value == "post_input")
@@ -648,7 +707,7 @@ def test_post_input_enable_sender_launches_with_body_and_preserves_enable_comple
 
 def test_pre_input_enable_launch_is_explicit_transaction_entry_control() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture, bound = _bind(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -670,7 +729,7 @@ def test_pre_input_enable_launch_is_explicit_transaction_entry_control() -> None
 @pytest.mark.parametrize("payload", (_ONE_BIT, _BYTE))
 def test_en_stages_bind_widths_from_their_exact_payloads(payload: PayloadType) -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture, bound = _bind(program, Sequence((
         If(select, program.receive("A", "a", payload), Skip()),
         If(select, program.send("B", program.name("a"), payload), Skip()),
@@ -691,7 +750,7 @@ def test_conditional_send_has_real_body_and_enable_handshake_lanes() -> None:
     program = _Program()
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+        If(program.external_name("select"), program.send("B", program.name("a")), Skip()),
     )))
 
     stage = architecture.en_send_stages[0]

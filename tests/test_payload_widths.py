@@ -45,7 +45,7 @@ always C.Send(x); endmodule''')
 
 def test_eight_bit_width_survives_m3_through_m7() -> None:
     behavioral, transaction, decomposed, validated, architecture, bound = _target('''
-module m(Channel #(8) A, B); logic [7:0] x, y, increment; always begin
+module m(input logic [7:0] increment, Channel #(8) A, B); logic [7:0] x, y; always begin
   A.Receive(x); y = x + increment; B.Send(y);
 end endmodule''')
     assert behavioral.variables[0].payload_type.width.bits == 8
@@ -59,7 +59,7 @@ end endmodule''')
 
 def test_conditional_receive_and_send_bind_eight_bit_m7_stages() -> None:
     _, _, _, _, architecture, bound = _target('''
-module m(Channel #(8) A, B); logic c; logic [7:0] x, y; always begin
+module m(input logic c, input logic [7:0] y, Channel #(8) A, B); logic [7:0] x; always begin
   if (c) A.Receive(x); B.Send(y);
 end endmodule''')
     stage = architecture.en_receive_stages[0]
@@ -68,7 +68,7 @@ end endmodule''')
                 if item.instance_id == instance.id and item.formal_name == 'WIDTH').bits == 8
 
     _, _, _, _, architecture, bound = _target('''
-module m(Channel #(8) A, B); logic c; logic [7:0] x; always begin
+module m(input logic c, Channel #(8) A, B); logic [7:0] x; always begin
   A.Receive(x); if (c) B.Send(x);
 end endmodule''')
     stage = architecture.en_send_stages[0]
@@ -79,7 +79,7 @@ end endmodule''')
 
 def test_handshake_and_enable_signals_remain_one_bit() -> None:
     _, _, _, _, architecture, bound = _target('''
-module m(Channel #(8) A, B); logic c; logic [7:0] x; always begin
+module m(input logic c, Channel #(8) A, B); logic [7:0] x; always begin
   A.Receive(x); if (c) B.Send(x);
 end endmodule''')
     assert all(channel.width.bits == 1 for channel in architecture.enable_channels)
@@ -91,7 +91,7 @@ end endmodule''')
 
 def test_selected_endpoints_and_shadowed_variables_preserve_identity_and_width() -> None:
     behavioral, _, _, _, _, bound = _target('''
-module m(Channel #(4) A[2], B); logic c; logic [3:0] x; always begin
+module m(input logic c, Channel #(4) A[2], B); logic [3:0] x; always begin
   B.Receive(x); if (c) A[0].Send(x); if (c) A[1].Send(x);
 end endmodule''')
     first, second = behavioral.body.items[1].then_branch.channel, behavioral.body.items[2].then_branch.channel
@@ -117,7 +117,7 @@ end endmodule''')
     with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
         _lower('module m(Channel #(16) C); logic [7:0] x; always C.Send(x); endmodule')
     with pytest.raises(BehavioralIRError, match='incompatible payload widths for Send'):
-        _lower('''module m(Channel #(8) B); logic c; logic [15:0] x; always
+        _lower('''module m(input logic c, Channel #(8) B); logic [15:0] x; always
 if (c) B.Send(x); endmodule''')
 
 

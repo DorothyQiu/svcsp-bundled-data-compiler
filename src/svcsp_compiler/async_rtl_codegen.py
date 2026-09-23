@@ -103,7 +103,8 @@ def _validate(bound: BoundAsyncModule) -> None:
         raise AsyncRTLCodegenError("assignment targets an undeclared signal")
     if any(source not in signal_ids for item in bound.assignments for source in item.source_signal_ids):
         raise AsyncRTLCodegenError("assignment references an undeclared source signal")
-    module_variables = bound.architecture.validated.decomposed.transaction.behavioral.variables
+    behavioral_module = bound.architecture.validated.decomposed.transaction.behavioral
+    module_variables = behavioral_module.variables + behavioral_module.external_inputs
     for variable in module_variables:
         matches = [item for item in bound.variable_bindings if item.variable is variable]
         if len(matches) != 1:

@@ -56,6 +56,7 @@ _TYPE = PayloadType("logic", ONE_BIT)
 class _Program:
     def __init__(self) -> None:
         self.variables: dict[str, Variable] = {}
+        self.external_inputs: dict[str, Variable] = {}
 
     def variable(self, name: str) -> Variable:
         return self.variables.setdefault(
@@ -64,6 +65,14 @@ class _Program:
 
     def name(self, name: str) -> Expression:
         variable = self.variable(name)
+        return Expression("name", value=name, variable=variable)
+
+    def external_name(self, name: str, payload_type: PayloadType = _TYPE) -> Expression:
+        if name in self.variables:
+            raise ValueError(f"{name} is already a local variable")
+        variable = self.external_inputs.setdefault(
+            name, Variable(name, (), SourceLocation("microarchitecture.sv", 1, 1), payload_type),
+        )
         return Expression("name", value=name, variable=variable)
 
     def receive(self, channel: str, target: str) -> Receive:
@@ -76,7 +85,10 @@ class _Program:
         return Assign(self.variable(target), value)
 
     def module(self, body) -> BehavioralModule:
-        return BehavioralModule("microarchitecture", body, (), tuple(self.variables.values()))
+        return BehavioralModule(
+            "microarchitecture", body, (), tuple(self.variables.values()),
+            external_inputs=tuple(self.external_inputs.values()),
+        )
 
 
 def _validated(program: _Program, body):
@@ -295,7 +307,7 @@ def test_storage_has_one_slot_per_body_send_and_retains_each_payload_until_its_o
 
 def test_en_recv_and_en_send_are_placed_on_their_exact_body_ports() -> None:
     program = _Program()
-    select = program.name("sel")
+    select = program.external_name("sel")
     conditional_receive = program.receive("A", "a")
     conditional_send = program.send("B", program.name("a"))
     validated = _validated(program, Sequence((
@@ -375,7 +387,7 @@ def test_architecture_explicitly_selects_half_buffer_style() -> None:
 
 def test_conditional_receive_has_a_pre_input_enable_channel_and_en_receive_stage() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     receive = program.receive("A", "a")
     validated = _validated(program, Sequence((
         If(select, receive, Skip()),
@@ -401,7 +413,7 @@ def test_conditional_receive_has_a_pre_input_enable_channel_and_en_receive_stage
 
 def test_conditional_send_has_a_post_input_enable_channel_and_en_send_stage() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     send = program.send("B", Expression("literal", value="1'b0"))
     validated = _validated(program, Sequence((
         program.receive("A", "a"),
@@ -428,7 +440,7 @@ def test_en_send_consumes_the_unconditional_body_output_without_dummy_payload_se
     send = program.send("B", Expression("literal", value="1'b0"))
     validated = _validated(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), send, Skip()),
+        If(program.external_name("select"), send, Skip()),
     )))
     architecture = lower_microarchitecture(validated)
 
@@ -441,8 +453,8 @@ def test_en_send_consumes_the_unconditional_body_output_without_dummy_payload_se
 
 def test_nested_and_multiple_conditional_communications_get_distinct_enable_channels() -> None:
     program = _Program()
-    outer = program.name("outer")
-    inner = program.name("inner")
+    outer = program.external_name("outer")
+    inner = program.external_name("inner")
     nested_receive = program.receive("A", "a")
     nested_send = program.send("B", Expression("literal", value="1'b0"))
     conditional_send = program.send("C", Expression("literal", value="1'b1"))
@@ -479,7 +491,7 @@ def test_body_stage_has_one_matched_delay_per_output_including_trivial_payloads(
 
 def test_en_receive_stage_contract_is_enable_first_conditional_external_and_unconditional_body() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     receive = program.receive("A", "a")
     architecture = _lower(program, Sequence((
         If(select, receive, Skip()),
@@ -500,7 +512,7 @@ def test_en_send_stage_contract_always_consumes_body_and_only_delays_enabled_ext
     send = program.send("B", Expression("literal", value="1'b0"))
     architecture = _lower(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), send, Skip()),
+        If(program.external_name("select"), send, Skip()),
     )))
 
     stage = architecture.en_send_stages[0]
@@ -520,7 +532,7 @@ def test_en_receive_resources_are_one_per_stage_and_identify_its_exact_body_inpu
     program = _Program()
     receive = program.receive("A", "a")
     architecture = _lower(program, Sequence((
-        If(program.name("select"), receive, Skip()),
+        If(program.external_name("select"), receive, Skip()),
         program.send("B", Expression("literal", value="1'b1")),
     )))
 
@@ -544,7 +556,7 @@ def test_en_send_resources_are_one_per_stage_and_identify_its_exact_body_output(
     send = program.send("B", Expression("literal", value="1'b0"))
     architecture = _lower(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), send, Skip()),
+        If(program.external_name("select"), send, Skip()),
     )))
 
     stage = architecture.en_send_stages[0]
@@ -565,8 +577,8 @@ def test_en_send_resources_are_one_per_stage_and_identify_its_exact_body_output(
 def test_en_resources_are_separate_from_ordinary_body_storage_and_matched_delays() -> None:
     program = _Program()
     architecture = _lower(program, Sequence((
-        If(program.name("select"), program.receive("A", "a"), Skip()),
-        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+        If(program.external_name("select"), program.receive("A", "a"), Skip()),
+        If(program.external_name("select"), program.send("B", program.name("a")), Skip()),
     )))
 
     assert len(architecture.storage.slots) == len(architecture.output_ports) == 1
@@ -581,7 +593,7 @@ def test_en_resources_are_separate_from_ordinary_body_storage_and_matched_delays
 
 def test_enable_stage_contracts_preserve_the_selected_half_buffer_four_phase_bundled_data_target() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture = _lower(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -594,7 +606,7 @@ def test_enable_stage_contracts_preserve_the_selected_half_buffer_four_phase_bun
 
 def test_every_enable_channel_has_one_unconditional_body_enable_send_for_its_exact_enable() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture = _lower(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -610,7 +622,7 @@ def test_every_enable_channel_has_one_unconditional_body_enable_send_for_its_exa
 
 def test_pre_input_enable_producer_precedes_join_and_is_a_body_control_output() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture = _lower(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),
@@ -629,7 +641,7 @@ def test_post_input_enable_producer_is_unconditional_body_control_output_in_comp
     program = _Program()
     architecture = _lower(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), program.send("B", Expression("literal", value="1'b0")), Skip()),
+        If(program.external_name("select"), program.send("B", Expression("literal", value="1'b0")), Skip()),
     )))
 
     channel = architecture.enable_channels[0]
@@ -645,7 +657,7 @@ def test_conditional_send_has_distinct_unconditional_enable_and_payload_body_com
     send = program.send("B", Expression("literal", value="1'b0"))
     architecture = _lower(program, Sequence((
         program.receive("A", "a"),
-        If(program.name("select"), send, Skip()),
+        If(program.external_name("select"), send, Skip()),
     )))
 
     channel = architecture.enable_channels[0]
@@ -658,7 +670,7 @@ def test_conditional_send_has_distinct_unconditional_enable_and_payload_body_com
 
 def test_conditional_receive_has_pre_input_enable_and_one_always_returned_body_token() -> None:
     program = _Program()
-    select = program.name("select")
+    select = program.external_name("select")
     architecture = _lower(program, Sequence((
         If(select, program.receive("A", "a"), Skip()),
         If(select, program.send("B", program.name("a")), Skip()),

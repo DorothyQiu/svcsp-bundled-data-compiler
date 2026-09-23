@@ -36,6 +36,7 @@ _BYTE = PayloadType("logic", PayloadWidth(bits=8))
 class _Program:
     def __init__(self) -> None:
         self.variables: dict[str, Variable] = {}
+        self.external_inputs: dict[str, Variable] = {}
 
     def variable(
         self,
@@ -54,6 +55,14 @@ class _Program:
 
     def name(self, name: str) -> Expression:
         variable = self.variable(name)
+        return Expression("name", value=name, variable=variable)
+
+    def external_name(self, name: str, payload_type: PayloadType = _BIT) -> Expression:
+        if name in self.variables:
+            raise ValueError(f"{name} is already a local variable")
+        variable = self.external_inputs.setdefault(
+            name, Variable(name, (), SourceLocation("async_codegen.sv", 1, 1), payload_type),
+        )
         return Expression("name", value=name, variable=variable)
 
     def receive(
@@ -84,6 +93,7 @@ class _Program:
             body,
             (),
             tuple(self.variables.values()),
+            external_inputs=tuple(self.external_inputs.values()),
         )
 
 
@@ -114,6 +124,18 @@ def _variable_signal_id(
     ]
     assert len(bindings) == 1
     return bindings[0].signal_id
+
+
+def test_external_input_is_rendered_as_a_public_port_not_a_body_variable() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    rtl = emit_async_systemverilog(_bound(program, Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        program.send("B", Expression("literal", value="1'b0")),
+    ))))
+
+    assert "input logic select" in rtl
+    assert "body_var_0_select" not in rtl
 
 
 def _assert_exact_binding_rendered(
@@ -408,7 +430,7 @@ def test_2r2s_emits_all_m6_join_fork_and_storage_connectivity() -> None:
 def test_conditional_communications_emit_exact_en_recv_and_en_send_bindings() -> None:
     program = _Program()
 
-    select = program.name("select")
+    select = program.external_name("select")
 
     bound = _bound(
         program,
@@ -551,7 +573,7 @@ def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_en
                     expression,
                 ),
                 If(
-                    program.name("select"),
+                    program.external_name("select"),
                     program.send(
                         "B",
                         program.name("y"),
@@ -598,7 +620,7 @@ def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_en
 
     select_signal = _variable_signal_id(
         bound,
-        program.variable("select"),
+        program.external_inputs["select"],
     )
 
     assert (
@@ -921,7 +943,7 @@ def test_2r2s_control_storage_and_delay_formals_emit_exactly_as_bound() -> None:
 def test_enable_channel_is_emitted_as_req_ack_data_without_scalar_enable_interface() -> None:
     program = _Program()
 
-    select = program.name(
+    select = program.external_name(
         "select"
     )
 
@@ -956,7 +978,7 @@ def test_enable_channel_is_emitted_as_req_ack_data_without_scalar_enable_interfa
     select_signal = (
         _variable_signal_id(
             bound,
-            program.variable("select"),
+            program.external_inputs["select"],
         )
     )
 
@@ -1024,7 +1046,7 @@ def test_assignments_and_rtl_are_byte_deterministic_for_identical_bound_modules(
                     "a",
                 ),
                 If(
-                    first_program.name(
+                    first_program.external_name(
                         "select"
                     ),
                     first_program.send(
@@ -1046,7 +1068,7 @@ def test_assignments_and_rtl_are_byte_deterministic_for_identical_bound_modules(
                     "a",
                 ),
                 If(
-                    second_program.name(
+                    second_program.external_name(
                         "select"
                     ),
                     second_program.send(
@@ -1082,7 +1104,7 @@ def test_conditional_enable_channel_acknowledgement_is_emitted_once_exactly_as_b
                     "a",
                 ),
                 If(
-                    program.name(
+                    program.external_name(
                         "select"
                     ),
                     program.send(
