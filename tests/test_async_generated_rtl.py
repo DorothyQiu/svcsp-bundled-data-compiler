@@ -15,6 +15,7 @@ from svcsp_compiler.behavioral_ir import (
     Expression,
     If,
     ONE_BIT,
+    Parameter,
     PayloadType,
     PayloadWidth,
     Receive,
@@ -69,9 +70,10 @@ class _Program:
     def send(self, channel: str, value: Expression, payload_type: PayloadType = _BIT) -> Send:
         return Send(ChannelEndpoint(channel, payload_type=payload_type), value)
 
-    def emit(self, body) -> str:
+    def emit(self, body, *, parameters: tuple[Parameter, ...] = ()) -> str:
         behavioral = BehavioralModule(
             self.module_name, body, (), tuple(self.variables.values()),
+            parameters=parameters,
             external_inputs=tuple(self.external_inputs.values()),
         )
         transaction = extract_transaction(behavioral)
@@ -133,6 +135,90 @@ module tb;
     channel_B_send_acknowledge = 1'b0;
     #2; if ({channel_A_receive_acknowledge, channel_B_send_request} !== 2'b00)
       $fatal(1, "transaction did not return idle");
+    $finish;
+  end
+endmodule
+""")
+
+
+def test_generated_parameter_guard_booleanizes_p_equals_two(tmp_path: Path) -> None:
+    program = _Program("generated_parameter_guard_two")
+    parameter = Parameter("P", program.module_name, SourceLocation("generated_rtl.sv", 1, 1), "2")
+    guard = Expression("parameter", value="P", parameter=parameter)
+    rtl = program.emit(Sequence((
+        program.receive("A", "a", _BYTE),
+        If(guard, program.send("B", program.name("a", _BYTE), _BYTE), Skip()),
+    )), parameters=(parameter,))
+
+    assert "assign enable_channel_0_value = !(!(P));" in rtl
+    _simulate_generated(tmp_path, "parameter_guard_two", rtl, """
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  reg [7:0] channel_A_receive_payload = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire [7:0] channel_B_send_payload;
+  generated_parameter_guard_two dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #150; $fatal(1, "P=2 guard deadlock"); end
+  initial begin
+    channel_A_receive_payload = 8'ha5;
+    channel_A_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge === 1'b1);
+    channel_A_receive_request = 1'b0;
+    wait (channel_B_send_request === 1'b1);
+    if (channel_B_send_payload !== 8'ha5) $fatal(1, "P=2 payload was not forwarded");
+    channel_B_send_acknowledge = 1'b1;
+    wait (channel_B_send_request === 1'b0);
+    channel_B_send_acknowledge = 1'b0;
+    wait (channel_A_receive_acknowledge === 1'b0);
+    $finish;
+  end
+endmodule
+""")
+
+
+def test_generated_multibit_external_guard_booleanizes_nonzero_and_zero(tmp_path: Path) -> None:
+    program = _Program("generated_multibit_guard")
+    select = program.external_name("sel", _BYTE)
+    rtl = program.emit(Sequence((
+        program.receive("A", "a", _BYTE),
+        If(select, program.send("B", program.name("a", _BYTE), _BYTE), Skip()),
+    )))
+
+    assert "assign enable_channel_0_value = !(!(sel));" in rtl
+    _simulate_generated(tmp_path, "multibit_guard", rtl, """
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  reg [7:0] channel_A_receive_payload = 0, sel = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire [7:0] channel_B_send_payload;
+  generated_multibit_guard dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #250; $fatal(1, "multi-bit guard deadlock"); end
+  task receive_a(input [7:0] value);
+    begin
+      channel_A_receive_payload = value;
+      channel_A_receive_request = 1'b1;
+      wait (channel_A_receive_acknowledge === 1'b1);
+      channel_A_receive_request = 1'b0;
+      wait (channel_A_receive_acknowledge === 1'b0);
+    end
+  endtask
+  initial begin
+    sel = 8'h00;
+    receive_a(8'h11);
+    #5; if (channel_B_send_request !== 1'b0) $fatal(1, "zero guard sent externally");
+    sel = 8'h02;
+    channel_A_receive_payload = 8'h5a;
+    channel_A_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge === 1'b1);
+    channel_A_receive_request = 1'b0;
+    wait (channel_B_send_request === 1'b1);
+    if (channel_B_send_payload !== 8'h5a) $fatal(1, "nonzero guard did not send");
+    channel_B_send_acknowledge = 1'b1;
+    wait (channel_B_send_request === 1'b0);
+    channel_B_send_acknowledge = 1'b0;
+    wait (channel_A_receive_acknowledge === 1'b0);
     $finish;
   end
 endmodule

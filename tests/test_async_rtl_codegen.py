@@ -634,13 +634,13 @@ def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_en
 
     assert (
         f"assign {enable.value_signal_id} = "
-        f"{select_signal};"
+        f"!(!({select_signal}));"
         in rtl
     )
 
     assert (
         f"assign {enable.data_signal_id} = "
-        f"{select_signal};"
+        f"!(!({select_signal}));"
         not in rtl
     )
 
@@ -1014,7 +1014,7 @@ def test_enable_channel_is_emitted_as_req_ack_data_without_scalar_enable_interfa
 
         assert (
             f"assign {channel.value_signal_id} = "
-            f"{select_signal};"
+            f"!(!({select_signal}));"
             in rtl
         )
 
@@ -1204,7 +1204,8 @@ endmodule
     rtl = emit_async_systemverilog(bound)
 
     assert "parameter int P = 1" in rtl
-    assert re.search(r"assign enable_channel_0_value = P;", rtl)
+    assert re.search(r"assign enable_channel_0_value = !\(!\(P\)\);", rtl)
+    assert "assign enable_channel_0_value = P;" not in rtl
 
     foreign = Parameter("P", "parameter_guard", behavioral.parameters[0].location, "1")
     malformed = replace(
@@ -1213,3 +1214,24 @@ endmodule
     )
     with pytest.raises(AsyncRTLCodegenError, match="exact source-module binding"):
         emit_async_systemverilog(malformed)
+
+
+def test_pre_and_post_input_enable_values_are_booleanized_without_changing_data_assignments() -> None:
+    program = _Program()
+    select = program.external_name("select", _BYTE)
+    bound = _bound(program, Sequence((
+        If(select, program.receive("A", "x", _BYTE), Skip()),
+        Assign(program.variable("y", _BYTE), Expression("literal", value="8'h3c")),
+        If(select, program.send("B", program.name("y"), _BYTE), Skip()),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    select_signal = _variable_signal_id(bound, program.external_inputs["select"])
+
+    pre = next(item for item in bound.enable_channels if item.availability.value == "pre_input")
+    post = next(item for item in bound.enable_channels if item.availability.value == "post_input")
+    assert f"assign {pre.value_signal_id} = !(!({select_signal}));" in rtl
+    assert f"assign {post.value_signal_id} = !(!({select_signal}));" in rtl
+
+    y_signal = _variable_signal_id(bound, program.variable("y", _BYTE))
+    assert f"assign {y_signal} = 8'h3c;" in rtl
+    assert f"assign {y_signal} = !(!(8'h3c));" not in rtl

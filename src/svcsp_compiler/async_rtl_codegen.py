@@ -201,7 +201,10 @@ def _parameter_value(value: behavioral.PayloadWidth, bound: BoundAsyncModule) ->
 
 def _assignment_rhs(assignment, bound: BoundAsyncModule) -> str:
     if assignment.expression is not None:
-        return _expression(assignment.expression, bound)
+        expression = _expression(assignment.expression, bound)
+        if assignment.kind == "enable_value":
+            return f"!(!({expression}))"
+        return expression
     if assignment.kind == "transaction_entry_launch":
         if len(assignment.source_signal_ids) != 1:
             raise AsyncRTLCodegenError("transaction-entry launch requires one control source")
