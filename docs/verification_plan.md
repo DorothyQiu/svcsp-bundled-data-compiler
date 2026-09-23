@@ -304,6 +304,60 @@ Ordinary parameter arithmetic and data-expression width inference, including
 `x + P` and `Send(P)`, remain outside R8. Existing failure-closed width proof
 rules continue to own those cases.
 
+## R9. Control-Preserving Combinational Lowering
+
+Verify source-order and enclosing-control preservation for every Assign in the
+transaction combinational region. Generated RTL must have one coherent
+combinational implementation for multiply written lvalues; it must not change
+blocking assignments into multiple unconditional continuous drivers or infer
+persistent state/latches. Verify the dedicated M7 receive-value signal per M6
+InputPort and one source-preserving `always_comb` BODY data realization; M6
+topology remains unchanged and structural/control wiring remains separate.
+
+### R9A — Whole-Variable Control/Order Preservation
+
+Verify whole-Variable ReceiveWrite and AssignWrite; Sequence and If/else
+control; blocking assignment semantics; parallel noninterference for
+whole-Variable accesses; same-target concurrent Receive rejection; and real
+source-file generated-RTL simulation. R9A deliberately does not implement
+selected lvalues: they remain fail-closed until R9B.
+
+Permanent R9A generated-RTL simulation coverage includes if/else assignment
+mux behavior; sequential blocking reassignment; nested guarded assignments;
+ordinary single assignment; and conditional Receive valid-data fallback:
+
+```systemverilog
+if (sel) A.Receive(a);
+if (sel) y = a;
+else y = 0;
+B.Send(y);
+```
+
+### R9B — Static Selected Lvalues
+
+Verify normalized static lvalue representation; interval/coverage-aware M5
+definitions; literal bit/range Receive targets; literal bit/range Assign
+targets; partial-write coverage; overlap handling; no whole-variable widening
+of selected writes; partial write followed by whole-variable read rejection;
+unknown/default handling for unassigned bits; and real generated-RTL
+simulation for every positive case.
+
+Permanent negative coverage rejects dynamic or parameter-dependent data
+lvalues such as `x[i] = value`, `A.Receive(x[i])`, `x[P] = value`, and
+`x[HI:LO] = value`; a dynamic Channel selector such as `A[sel].Receive(x)`;
+and an unsupported general symbolic packed range such as `logic [W:0] x`.
+These cases must fail before M7. Constant/static Channel selectors and
+normalized symbolic widths such as `[W-1:0]` remain separately covered
+supported forms.
+
+For Parallel combinational branches, permanently reject overlapping Write/Write
+and Write/Read accesses, whole-Variable/selected overlap, undecidable overlap,
+and concurrent Receives targeting the same or overlapping source lvalue.
+
+Verification follow-up, not a claimed correctness defect: comparison/logical
+guards; bit/range-select Send expressions; concatenation guards; ordinary
+external-input payload data; and generated 3R/3S integration.
+
 ## Permanent Negative Regression
 
 Rejection behavior defined by `supported_architectures.md` and by the owning

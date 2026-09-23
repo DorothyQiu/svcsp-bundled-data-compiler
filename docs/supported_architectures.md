@@ -225,6 +225,84 @@ because the decision to perform `B.Receive` depends on data produced by
 
 The same principle applies to output communication.
 
+## Combinational Assignment Semantics
+
+The combinational region preserves SystemVerilog blocking-assignment semantics.
+Source order, enclosing `if` / `else` control, the exact lvalue, and the exact
+right-hand-side expression remain semantically significant.
+
+For example:
+
+```systemverilog
+A.Receive(a);
+if (sel) y = a;
+else     y = ~a;
+B.Send(y);
+```
+
+selects one value for `y`; it does not create two independent drivers. Likewise:
+
+```systemverilog
+y = a;
+y = ~y;
+```
+
+uses the value assigned by the first statement when evaluating the second.
+
+R9A supports whole local Variable targets of any already-supported width.
+Selected lvalues remain fail-closed until R9B.
+
+R9B supports a bit-select lvalue only when its base is a concrete-width local
+Variable, its index is a literal integer, and that index is statically in
+bounds. It supports a range-select lvalue only when its base is a
+concrete-width local Variable, both endpoints are literal integers, and the
+selected interval is statically in bounds. A supported Receive into `x[0]`, or
+an Assign to `x[0]` or `x[3:1]`, writes only that selected lvalue. The
+compiler does not widen such a write to the complete base Variable and does
+not introduce an implicit resize, truncation, or extension.
+
+Current width proof alone does not establish safe lvalue alias or coverage
+semantics. R9 rejects dynamic indices, parameter-dependent indices or ranges,
+and selected lvalues on symbolic-width base Variables whose coverage cannot be
+proven. For example, all of the following fail closed:
+
+```systemverilog
+x[i] = value;
+A.Receive(x[i]);
+x[P] = value;
+x[HI:LO] = value;
+```
+
+Accepted combinational values used later in the transaction must be fully
+defined by the existing semantic-validation rules. R9 adds neither persistent
+state nor latch inference for incomplete assignment coverage.
+
+Parallel combinational branches are supported only when their data accesses
+are proven noninterfering. The compiler rejects cross-branch overlapping
+Write/Write accesses, Write/Read or Read/Write overlap, a whole-Variable access
+overlapping a selected access, and any overlap that cannot be decided because
+of an unsupported selector. Thus this is supported after proof:
+
+```systemverilog
+fork
+    y = a;
+    z = b;
+join
+```
+
+while this is rejected:
+
+```systemverilog
+fork
+    y = a;
+    y = b;
+join
+```
+
+Two same-region concurrent Receives targeting the same or overlapping source
+lvalue are also rejected until a future architecture defines arbitration or
+merge semantics.
+
 ## Conditional Receive
 
 Conditional Receive is supported:
@@ -356,6 +434,30 @@ The physical representation of these controls is not defined at the source
 architecture level.
 
 ## Unsupported Source Structures
+
+### Dynamic Channel endpoint selection
+
+```systemverilog
+A[sel].Receive(x);
+```
+
+is not supported. R9 rejects dynamic Channel endpoint selectors before M7;
+supporting them would require a distinct Channel-array routing architecture.
+Constant/static Channel selection remains supported where its endpoint and
+payload can be resolved.
+
+### General symbolic packed ranges
+
+Until a future width-model milestone, the supported symbolic packed-width form
+is the normalized cardinality form, for example:
+
+```systemverilog
+logic [W-1:0] x;
+Channel #(W) A;
+```
+
+Arbitrary symbolic packed ranges such as `logic [W:0] x` are rejected before
+M7. They must not be rendered as an invented or malformed width expression.
 
 ### Interleaved communication phases
 

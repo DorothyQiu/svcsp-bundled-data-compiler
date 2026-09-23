@@ -283,7 +283,33 @@ Later dependency / validity analysis proves whether each use is legal.
 
 ---
 
-# 7. Required Identity Preservation
+# 7. Combinational Control Preservation
+
+M4 decomposes conditional communication, not source combinational assignment
+semantics. Assign operations retain their source order, enclosing conditional
+control, exact lvalue, and exact RHS expression through this stage.
+
+For example, after a conditional Receive:
+
+```systemverilog
+if (sel) y = a;
+else     y = 0;
+```
+
+remains a guarded combinational definition of `y`. M4 does not replace it with
+two unconditional definitions and does not collapse a selected lvalue such as
+`x[i]` to the complete Variable `x`. M5 validates these definitions and M7
+later realizes them without introducing state or changing their control/order.
+
+R9A implements whole-Variable writes only. Static literal bit/range lvalues
+are an R9B responsibility; dynamic or parameter-dependent data lvalue
+selectors remain fail-closed. M4 also preserves Parallel branch identity so M5
+can reject interfering concurrent combinational accesses and same-target
+concurrent Receives before M7.
+
+---
+
+# 8. Required Identity Preservation
 
 For every decomposed conditional communication, preserve the association among:
 
@@ -300,7 +326,7 @@ Later compiler stages rely on these identities.
 
 ---
 
-# 8. Stage Boundary
+# 9. Stage Boundary
 
 This stage decides:
 

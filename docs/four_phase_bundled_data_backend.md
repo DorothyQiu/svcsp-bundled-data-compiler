@@ -368,6 +368,18 @@ boundaries until technology mapping supplies their final implementations.
 Reset is part of the ordinary control implementation and is not part of the
 user payload datapath.
 
+User combinational logic may be represented behaviorally or by continuous RTL,
+but its representation must preserve validated source control, blocking
+assignment order, exact lvalues, and exact RHS expressions. This allowance
+does not authorize latch inference, persistent state, a change to M6 handshake
+topology, or a widening of a selected lvalue write.
+
+For R9, each M6 InputPort payload feeds a dedicated M7 receive-value signal.
+The source-preserving BODY data program consumes that signal and writes source
+body Variables; it is not a new M6 datapath stage or handshake resource. R9A
+uses whole-Variable writes and one `always_comb` BODY realization. R9B adds
+only normalized static literal bit/range lvalues and their coverage handling.
+
 ## 10. EN_RECV and EN_SEND Stages
 
 Conditional communication is implemented using separate EN_RECV and EN_SEND
@@ -509,6 +521,17 @@ per-EN-stage outgoing matched-delay placement
 ```
 
 M7 only binds and emits the M6-selected structure.
+
+M7 may choose a coherent combinational realization for validated source Assign
+operations, such as an `always_comb` block or equivalent SSA/mux logic. That
+choice is not an M6 topology decision: M6 neither rewrites source assignment
+control/order nor adds a combinational storage resource.
+
+The selected R9 implementation initially uses one `always_comb` BODY data
+program. Structural/control wiring remains separate; it includes no user Assign
+as an independent continuous driver. Dynamic/parameter-dependent data lvalues,
+arbitrary symbolic ranges, dynamic Channel routing, persistent state,
+arbitration, and new handshake topology are outside R9.
 
 M7 must not independently:
 

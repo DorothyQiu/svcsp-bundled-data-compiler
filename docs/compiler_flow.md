@@ -127,6 +127,9 @@ Structurally Validated Transaction
 ```
 
 M3 preserves source-parameter identities and creates no parameter semantics.
+It also preserves the source order, enclosing control structure, exact lvalue,
+and exact RHS of every combinational-region Assign so later stages can retain
+blocking-assignment semantics.
 
 ## 4. Conditional Communication Decomposition
 
@@ -187,7 +190,12 @@ validity information
 ```
 
 M5 preserves source-parameter identities and validates their existing allowed
-uses; it does not add parameter type or width inference.
+uses; it does not add parameter type or width inference. Its dependency and
+validity facts use the same ordered and guarded definition semantics that M7
+must realize; they are not permission to reinterpret source assignments as
+independent continuous drivers. M5 also proves Parallel combinational branches
+noninterfering and rejects cross-branch overlapping Write/Write and Write/Read
+accesses, including same-target concurrent Receives.
 
 ## 6. Asynchronous Microarchitecture Lowering
 
@@ -210,6 +218,8 @@ EN-stage matched-delay requirements
 M6 realizes only the availability selected for a validated Enable; it does not
 invent an external input, persistent state, or a control Channel.
 It preserves source-parameter identities and creates no parameter semantics.
+M6 selects asynchronous topology and resources only; it does not rewrite
+source combinational control, lvalues, or blocking-assignment order.
 
 For the current backend, use
 `four_phase_bundled_data_backend.md` as the authoritative hardware
@@ -255,6 +265,31 @@ undeclared symbolic parameter name.
 Before transmitting an M4 logical Enable on its one-bit enable Channel, M7
 booleanizes the condition to one logical bit. This binding action does not
 change M6 availability or topology.
+
+For the combinational region, M7 realizes the already validated source
+semantics. It preserves Assign order, enclosing control, exact lvalues, and
+exact RHS expressions. It must not emit each source Assign as an unconditional
+continuous assignment when that changes branch selection or blocking-assignment
+behavior. Multiple writes to a variable or selected lvalue require one coherent
+combinational implementation, such as one `always_comb` representation or an
+equivalent SSA/mux lowering. M7 adds no persistent state and must fail closed
+rather than infer a latch from incomplete assignment coverage.
+
+M6 input datapaths bind to one dedicated M7 receive-value signal per InputPort,
+not directly to a source body Variable. M7 feeds those signals into a
+source-preserving procedural BODY data program, which computes body-variable
+values consumed by BodySend storage `data_in` signals. The program preserves
+Sequence order, If/else control, Receive writes, Assign writes, exact source
+Variable identity, exact supported lvalue, and exact RHS expressions. M7
+initially emits one `always_comb` realization. `BoundAsyncModule.assignments`
+remains structural/control wiring and does not represent user Assign operations
+as independent continuous assignments. This changes no M6 topology.
+
+R9A supports whole-Variable ReceiveWrite and AssignWrite only; selected
+lvalues remain fail-closed. R9B adds normalized static bit/range lvalues,
+interval/coverage-aware M5 definitions, overlap handling, and partial-write
+coverage. M7 must preserve a supported selected target exactly; it must not
+turn `x[0]` into a write to all of `x`, silently resize it, or truncate it.
 
 M7 must not invent:
 
