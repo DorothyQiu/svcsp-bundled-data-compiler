@@ -124,7 +124,6 @@ def _assert_ordinary_body_topology(architecture: AsyncMicroarchitecture, *, inpu
     else:
         assert isinstance(architecture.output_ack, OutputAckDirectConnection)
 
-
 def test_ordinary_body_1r1s_bypasses_request_and_ack_joins_with_one_base_controller() -> None:
     program = _Program()
     architecture = _lower(program, Sequence((
@@ -133,8 +132,12 @@ def test_ordinary_body_1r1s_bypasses_request_and_ack_joins_with_one_base_control
     )))
 
     _assert_ordinary_body_topology(
-        architecture, inputs=1, outputs=1, has_request_join=False,
-        has_request_fanout=False, has_ack_join=False,
+        architecture,
+        inputs=1,
+        outputs=1,
+        has_request_join=False,
+        has_request_fanout=False,
+        has_ack_join=False,
     )
 
 
@@ -147,8 +150,12 @@ def test_ordinary_body_2r1s_has_request_join_one_base_controller_and_ack_join_by
     )))
 
     _assert_ordinary_body_topology(
-        architecture, inputs=2, outputs=1, has_request_join=True,
-        has_request_fanout=False, has_ack_join=False,
+        architecture,
+        inputs=2,
+        outputs=1,
+        has_request_join=True,
+        has_request_fanout=False,
+        has_ack_join=False,
     )
 
 
@@ -161,8 +168,12 @@ def test_ordinary_body_1r2s_has_one_base_controller_request_fanout_and_ack_join(
     )))
 
     _assert_ordinary_body_topology(
-        architecture, inputs=1, outputs=2, has_request_join=False,
-        has_request_fanout=True, has_ack_join=True,
+        architecture,
+        inputs=1,
+        outputs=2,
+        has_request_join=False,
+        has_request_fanout=True,
+        has_ack_join=True,
     )
 
 
@@ -176,8 +187,33 @@ def test_ordinary_body_2r2s_has_request_join_one_base_controller_request_fanout_
     )))
 
     _assert_ordinary_body_topology(
-        architecture, inputs=2, outputs=2, has_request_join=True,
-        has_request_fanout=True, has_ack_join=True,
+        architecture,
+        inputs=2,
+        outputs=2,
+        has_request_join=True,
+        has_request_fanout=True,
+        has_ack_join=True,
+    )
+
+
+def test_ordinary_body_3r3s_uses_the_same_generic_join_fanout_and_ack_join_topology() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        program.receive("C", "c"),
+        program.send("D", program.name("a")),
+        program.send("E", program.name("b")),
+        program.send("F", program.name("c")),
+    )))
+
+    _assert_ordinary_body_topology(
+        architecture,
+        inputs=3,
+        outputs=3,
+        has_request_join=True,
+        has_request_fanout=True,
+        has_ack_join=True,
     )
 
 

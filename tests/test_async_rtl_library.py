@@ -46,20 +46,27 @@ def test_ordinary_body_structural_library_components_are_declared() -> None:
 
     assert "module muller_c_element2" in c_element
     assert "reset_n" in c_element
+
     assert "muller_c_element2 state_element" in controller
     assert "always" not in controller
     assert "reset_n" in controller
-    for source, module in ((request_join, "four_phase_request_join"),
-                           (ack_fanout, "four_phase_ack_fanout"),
-                           (request_fanout, "four_phase_request_fanout"),
-                           (ack_join, "four_phase_ack_join")):
+
+    for source, module in (
+        (request_join, "four_phase_request_join"),
+        (ack_fanout, "four_phase_ack_fanout"),
+        (request_fanout, "four_phase_request_fanout"),
+        (ack_join, "four_phase_ack_join"),
+    ):
         assert f"module {module}" in source
+
     assert "module latch_cell" in latch_cell
     assert "always" not in latch_cell
     assert "initial" not in latch_cell
+    assert "reset_n" not in latch_cell
+
     assert "module bundled_data_latch_bank" in latch_bank
     assert "latch_cell bit_latch" in latch_bank
-
+    assert "reset_n" not in latch_bank
 
 def test_ordinary_body_controller_reset_four_phase_behavior_and_latch_bank(tmp_path: Path) -> None:
     _simulate(tmp_path, "ordinary_body_structural_components", """
