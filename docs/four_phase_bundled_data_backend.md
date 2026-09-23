@@ -414,6 +414,12 @@ EN_SEND:
 relative to BODY input acquisition. They do not define additional source-level
 communication ordering.
 
+An explicit external input used by a PRE_INPUT enable is an unhandshaked module
+input.  The environment must make its value stable before the corresponding
+PRE_INPUT enable is captured for a transaction and keep it stable through that
+capture.  This timing contract adds neither a Channel nor source-level
+communication ordering.
+
 ### EN_RECV
 
 ```text

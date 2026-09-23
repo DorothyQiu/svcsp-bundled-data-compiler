@@ -43,7 +43,7 @@ later stages, including:
 ```text
 modules and processes
 Channel endpoints
-variables and parameters
+external inputs, local variables, and parameters
 lexical scope
 payload widths
 Receive / Send
@@ -53,6 +53,9 @@ fork / join
 expressions
 source locations
 ```
+
+Resolve explicit non-channel ANSI input ports as external-input identities;
+they are not local variables or Channel endpoints.
 
 Output:
 
@@ -78,6 +81,9 @@ Skip
 
 Preserve source behavior, semantic identities, expressions, widths, and control
 structure.
+
+Preserve the module-owned identities of explicit external inputs separately
+from local variables.  Do not create persistent-state semantics.
 
 A source-level `Sequence` does not by itself imply serialized hardware
 communication.
@@ -151,6 +157,12 @@ conditional data validity
 communication independence
 ```
 
+Validate guard sources and availability.  A read with no reaching local
+definition is valid only for an explicit external input or parameter; otherwise
+reject it.  Enforce the pre-input Conditional Receive and post-input
+Conditional Send source restrictions defined in
+`supported_architectures.md`.
+
 Reject semantically unsupported communication, including dependent Receives and
 invalid uses of conditionally received data.
 
@@ -182,6 +194,9 @@ EN-stage payload storage
 EN-stage matched-delay requirements
 ```
 
+M6 realizes only the availability selected for a validated Enable; it does not
+invent an external input, persistent state, or a control Channel.
+
 For the current backend, use
 `four_phase_bundled_data_backend.md` as the authoritative hardware
 specification.
@@ -209,6 +224,10 @@ deterministic names
 expression rendering
 exact M6-resource-to-RTL-instance traceability
 ```
+
+M7 emits each explicit external input as a public module input port with its
+preserved identity.  It must not infer an external input from a local variable
+that lacks a definition.
 
 M7 must not invent:
 

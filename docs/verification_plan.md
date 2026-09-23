@@ -20,7 +20,7 @@ Verify:
 ```text
 modules and processes
 Channel endpoints
-variables and parameters
+external inputs, local variables, and parameters
 lexical scope
 payload widths
 Receive / Send
@@ -56,6 +56,9 @@ Skip
 ```
 
 A behavioral `Sequence` must not imply serialized hardware handshakes.
+
+Verify that explicit external-input identities are preserved separately from
+local-variable identities.
 
 ## M3. Transaction Extraction + Structural Validation
 
@@ -121,6 +124,9 @@ Receive-dependent Receive enable
 invalid conditional receive data use
 other non-independent communication
 ```
+
+Also reject reads with no reaching definition unless they identify an explicit
+external input or parameter.
 
 ## M6. Asynchronous Microarchitecture Lowering
 
@@ -247,6 +253,26 @@ disabled conditional external communication remains untouched or suppressed
 multi-transaction re-arming with changed payloads
 conditional re-arming with changed enable values
 ```
+
+## R7. External Input / Guard Source Contract
+
+Verify:
+
+```text
+explicit non-channel ANSI input ports are accepted and retain exact identity
+external inputs remain distinct from local variables in behavioral IR
+PRE_INPUT Receive guards accept literals, parameters, and expressions of external inputs
+PRE_INPUT Receive guards reject BODY Receive data and local assigned data
+POST_INPUT Send guards accept valid unconditional Receive and computed data
+M7 emits each explicit external input as a public RTL input port
+M7 does not emit an explicit external input as an internal body_var_* signal
+generated RTL drives PRE_INPUT enables from the public external-input port
+PRE_INPUT simulation holds an external input stable through enable capture
+```
+Parameter guard semantics are verified independently of external-input identity.
+End-to-end RTL module-parameter emission is outside the R7 external-input scope.
+Keep permanent negative coverage for an undefined local guard: it must not be
+accepted as an implicit module input.
 
 ## Permanent Negative Regression
 

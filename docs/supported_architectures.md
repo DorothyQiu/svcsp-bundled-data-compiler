@@ -36,6 +36,32 @@ input communication
 
 Ordered or multi-stage communication is outside the current target.
 
+## External Inputs and Guard Sources
+
+An SVCSP module may declare explicit non-channel ANSI input ports, for example:
+
+```systemverilog
+module select_input(input logic sel, interface A, B);
+```
+
+These ports are environment-supplied transaction control or data inputs.  They
+are distinct from local variables and may be read in supported expressions.
+An undefined local variable is not an implicit module input.  This source model
+does not introduce persistent state.
+
+Conditional Receive guards must be computable before BODY input acquisition.
+They may use literals, parameters, explicit external inputs, and expressions
+composed from those pre-input sources.  They may not use BODY Receive data or
+transaction-local assigned data.
+
+Conditional Send guards may additionally use valid unconditional Receive data
+and transaction-local computed values, subject to dependency and validity
+analysis.
+
+Parameters are valid semantic guard sources.  Generated-RTL module-parameter
+emission is a separate backend capability and is not added by the R7
+external-input contract.
+
 ## Unconditional Transactions
 
 ### 1 Receive -> 1 Send
@@ -153,6 +179,9 @@ Conditional Receive is supported:
 if (sel)
     A.Receive(a);
 ```
+
+Here `sel` must be an explicit external input (or the guard must otherwise use
+only the permitted pre-input sources defined above).
 
 The compiler later decomposes this into unconditional BODY-side communication
 plus conditional external communication.
