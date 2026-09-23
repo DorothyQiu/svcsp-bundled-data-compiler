@@ -1,61 +1,49 @@
 # Verification and Implementation Plan
 
-This document defines the implementation order and verification checklist for
-the target compiler.
-
 For every milestone:
 
 ```text
 define expected behavior
--> add or update tests
+-> add/update tests
 -> modify implementation
 -> run regression
 -> proceed only when stable
 ```
 
----
+Architecture definitions belong in the corresponding specification documents;
+this file only records what must be verified.
 
-# M1. Frontend / Semantic Analysis
+## M1. Frontend / Semantic Analysis
 
-## Goal
+Verify:
 
-Extract the source semantics required by later compiler stages.
+```text
+modules and processes
+Channel endpoints
+variables and parameters
+lexical scope
+payload widths
+Receive / Send
+assignments
+if / else
+nested conditions
+fork / join
+supported expressions
+source locations
+```
 
-## Test coverage
+Required properties:
 
-- modules and top-level processes;
-- Channel endpoints;
-- `Receive()` / `Send()`;
-- variables and parameters;
-- lexical scope;
-- payload widths;
-- assignments;
-- `if` / `else`;
-- nested conditions;
-- `fork` / `join`;
-- supported expressions;
-- source locations.
+```text
+use pyslang
+preserve semantic identity
+fail closed on unresolved required information
+make no asynchronous hardware decisions
+```
 
-## Required properties
+## M2. Behavioral CSP IR
 
-- use `pyslang`;
-- preserve exact semantic identities;
-- fail explicitly when required semantic information cannot be resolved;
-- make no asynchronous hardware decisions.
-
-## Done when
-
-The frontend provides a stable semantic representation sufficient for M2.
-
----
-
-# M2. Behavioral CSP IR
-
-## Goal
-
-Convert frontend semantics into compiler-owned behavioral IR.
-
-## Required IR concepts
+Verify representation and identity preservation for:
 
 ```text
 Sequence
@@ -67,78 +55,23 @@ Assign
 Skip
 ```
 
-## Test coverage
+A behavioral `Sequence` must not imply serialized hardware handshakes.
 
-- single Receive / Send;
-- assignment;
-- Receive -> logic -> Send;
-- sequential statements;
-- `fork` / `join`;
-- `if`;
-- `if` / `else`;
-- nested conditions.
+## M3. Transaction Extraction + Structural Validation
 
-Verify preservation of:
+Positive coverage:
 
 ```text
-Channel identity
-variable identity
-expressions
-payload widths
-control structure
+1R1S
+2R1S
+1R2S
+2R2S
+explicit fork/join
+sequential independent Receives
+sequential independent Sends
 ```
 
-## Required property
-
-A behavioral `Sequence` preserves source structure but does not by itself imply
-serialized hardware handshakes.
-
-## Done when
-
-All supported source structures can be represented without hardware-specific
-objects.
-
----
-
-# M3. Transaction Extraction + Structural Validation
-
-## Goal
-
-Recognize the target single-stage transaction:
-
-```text
-N independent Receive(s)
-        |
-        v
-Combinational Logic
-        |
-        v
-M independent Send(s)
-```
-
-## Positive tests
-
-- `1R1S`;
-- `2R1S`;
-- `1R2S`;
-- `2R2S`;
-- explicit `fork` / `join`;
-- sequentially written independent Receives;
-- sequentially written independent Sends.
-
-Sequential independent communication must be:
-
-```text
-accepted
-+
-interpreted as concurrent
-+
-warning emitted recommending fork/join
-```
-
-## Negative tests
-
-Reject:
+Negative coverage:
 
 ```text
 Receive -> Send -> Receive
@@ -146,289 +79,107 @@ Receive after computation begins
 repeated endpoint communication
 ```
 
-## Done when
+Sequential independent communications are accepted as concurrent and should
+produce the documented warning.
 
-The compiler either produces:
-
-```text
-Receive Region
-Combinational Region
-Send Region
-```
-
-or rejects the source explicitly.
-
----
-
-# M4. Conditional Communication Decomposition
-
-## Goal
-
-Transform conditional communication into:
-
-```text
-BODY + enable + EN_RECV / EN_SEND
-```
-
-with unconditional BODY-side communication.
-
-M4 keeps Enable logical: it is not yet a Channel or wire. The current M6/M7
-target later realizes every Enable as a one-bit four-phase bundled-data control
-Channel from BODY to its EN_RECV or EN_SEND stage.
-
-## Tests
-
-### Conditional Receive
+## M4. Conditional Communication Decomposition
 
 Verify:
 
 ```text
-enable = 1:
-    external Receive occurs
-    BODY receives real data
-
-enable = 0:
-    external Channel untouched
-    BODY receives dummy / invalid data
+conditional Receive
+conditional Send
+input alternatives
+output alternatives
+nested conditions
+exact source/endpoint/payload/enable identity
 ```
 
-### Conditional Send
+BODY communication remains unconditional.
+
+Detailed expected semantics are defined in
+`communication_decomposition.md`.
+
+## M5. Dependency / Validity Analysis
 
 Verify:
 
 ```text
-enable = 1:
-    external Send occurs
-
-enable = 0:
-    external Send suppressed
-```
-
-EN_SEND still consumes the unconditional BODY token when disabled; it ignores
-the payload and creates no extra dummy token.
-
-### Alternatives
-
-Verify complementary enables for:
-
-```systemverilog
-if (sel)
-    A.Receive(a);
-else
-    B.Receive(b);
-```
-
-and for conditional output alternatives.
-
-### Nested conditions
-
-Verify composed enables such as:
-
-```text
-x && y
-x && !y
-!x
-```
-
-### Identity preservation
-
-Verify the association among:
-
-```text
-source communication
-Channel endpoint
-payload
-enable
-BODY-side communication
-EN_RECV / EN_SEND
-```
-
-## Done when
-
-All conditional external communication is decomposed and BODY-side
-communication is unconditional.
-
----
-
-# M5. Dependency / Validity Analysis + Semantic Validation
-
-## Goal
-
-Analyze:
-
-```text
-data dependency
-control / enable dependency
-conditional data validity
+data dependencies
+control dependencies
+conditional receive validity
 communication independence
+expression-local guards
+cross-parallel dependencies
 ```
 
-## Tests
-
-### Data dependency
-
-For:
-
-```systemverilog
-A.Receive(a);
-B.Receive(b);
-c = a + b;
-C.Send(c);
-```
-
-verify dependencies from `a` and `b` to `c`, without adding Receive ordering.
-
-### Conditional validity
-
-Accept:
-
-```systemverilog
-if (sel)
-    A.Receive(a);
-
-if (sel)
-    y = f(a);
-else
-    y = DEFAULT_VALUE;
-```
-
-Reject:
-
-```systemverilog
-if (sel)
-    A.Receive(a);
-
-y = f(a);
-```
-
-### Communication independence
-
-Reject:
-
-```systemverilog
-A.Receive(a);
-
-if (a[0])
-    B.Receive(b);
-```
-
-because `B.Receive` depends on data produced by `A.Receive`.
-
-## Done when
-
-The compiler produces:
+Reject at least:
 
 ```text
-semantically validated transaction
-+
-dependency information
-+
-validity information
+Receive-dependent Receive enable
+invalid conditional receive data use
+other non-independent communication
 ```
 
-or rejects the source explicitly.
+## M6. Asynchronous Microarchitecture Lowering
 
----
+Use `four_phase_bundled_data_backend.md` as the expected architecture.
 
-# M6. Asynchronous Microarchitecture Lowering
-
-## Goal
-
-Map validated transaction semantics to explicit asynchronous hardware.
-
-## Required architecture cases
-
-### A1 — 1R1S
-
-Verify the baseline single-stage structure.
-
-### A2 — 2R1S
-
-Verify input synchronization.
-
-Test both arrival orders:
+Verify at minimum:
 
 ```text
-A then B
-B then A
+1R1S:
+    request join bypass
+    one base half-buffer controller
+    ACK join bypass
+
+2R1S:
+    input request join
+    one base half-buffer controller
+    output ACK direct
+
+1R2S:
+    input request direct
+    one base half-buffer controller
+    output request fanout
+    output ACK join
+
+2R2S:
+    input request join
+    one base half-buffer controller
+    output request fanout
+    output ACK join
 ```
 
-### A3 — 1R2S
-
-Verify independent output distribution.
-
-Delay one output acknowledgement and confirm that the other independent output
-is not unnecessarily serialized.
-
-### A4 — 2R2S
-
-Verify the general multi-input / multi-output structure.
-
-### Conditional communication
-
-Verify placement and connectivity of:
+Also verify:
 
 ```text
-EN_RECV
-EN_SEND
+structural storage placement
+one matched-delay requirement per ordinary BODY output
+EN_RECV placement
+EN_SEND placement
+enable Channel availability and identity
 ```
 
-Verify the current four-phase bundled-data half-buffer realization: BODY sends
-exactly one one-bit enable token per transaction to each separate EN_RECV or
-EN_SEND micropipeline stage. Enable Channels are BODY control outputs, not
-ordinary post-join data outputs. An EN_RECV enable must be available without
-waiting for its controlled BODY input; EN_RECV always produces a BODY token,
-using InvalidPayload/dummy data when disabled.
+M6 is complete when M7 requires no new architecture decisions.
 
-## Required architecture decisions
-
-The microarchitecture must fully define:
-
-```text
-input synchronization
-output distribution
-controller structure
-storage
-matched-delay requirements
-EN_RECV / EN_SEND placement
-```
-
-## Done when
-
-No new hardware architecture decision is required by the RTL backend.
-
----
-
-# M7. Structural RTL Backend
-
-## Goal
-
-Emit structural, synthesizable asynchronous SystemVerilog.
-
-Initial backend:
-
-```text
-four-phase bundled-data half-buffer
-```
-
-## Structural tests
+## M7. Structural RTL Backend
 
 Verify:
 
-- component instances;
-- ports and parameters;
-- payload widths;
-- signal connectivity;
-- request / acknowledge directions;
-- storage connectivity;
-- matched-delay connectivity;
-- EN_RECV / EN_SEND connectivity;
-- deterministic generated names;
-- deterministic RTL output.
+```text
+component instances
+ports and parameters
+payload widths
+signal connectivity
+request/acknowledge directions
+storage connectivity
+matched-delay connectivity
+EN_RECV / EN_SEND connectivity
+deterministic RTL output
+```
 
-## Simulation regression
-
-Cover at least:
+Generated-RTL simulation coverage should include:
 
 ```text
 1R1S
@@ -447,22 +198,17 @@ Verify:
 
 ```text
 functional result
-handshake completion
+four-phase completion
 payload stability
 input independence
 output independence
 conditional communication behavior
+multi-transaction re-arming
 ```
 
-## Done when
+## Permanent Negative Regression
 
-Generated RTL preserves the semantics of the validated source transaction.
-
----
-
-# Negative Regression Set
-
-Keep permanent rejection tests for:
+Keep rejection tests for:
 
 ```text
 Receive -> Send -> Receive
@@ -470,24 +216,5 @@ Receive after computation begins
 repeated endpoint communication
 dependent Receive
 invalid conditional data use
-other non-independent communication
+other unsupported communication ordering
 ```
-
-These cases remain rejected unless the target architecture is explicitly
-extended.
-
----
-
-# Milestone Order
-
-```text
-M1  Frontend / Semantic Analysis
-M2  Behavioral CSP IR
-M3  Transaction Extraction + Structural Validation
-M4  Conditional Communication Decomposition
-M5  Dependency / Validity + Semantic Validation
-M6  Asynchronous Microarchitecture Lowering
-M7  Structural RTL Backend
-```
-
-Complete and verify one milestone before redesigning the next.

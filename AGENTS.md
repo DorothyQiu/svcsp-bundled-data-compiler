@@ -1,130 +1,113 @@
 # Project Goal
 
-Build a compiler from a supported subset of SystemVerilog CSP (SVCSP) to
-structural, synthesizable asynchronous RTL.
+Compile the supported SVCSP subset to structural asynchronous RTL.
 
-Initial backend target:
+Initial backend:
 
 ```text
 four-phase bundled-data half-buffer
 ```
 
-The target compiler architecture is defined by the documentation, not by legacy
-implementation structures.
+Target architecture is defined by documentation, not by existing or legacy
+implementation code.
 
-# Target Source Model
+# Authoritative Specifications
 
-One supported top-level process represents one transaction, not necessarily one
-physical stage:
-
-```text
-N independent Channel Receive(s)
-              |
-              v
-      Combinational Logic
-              |
-              v
-M independent Channel Send(s)
-```
-
-with `N >= 1` and `M >= 1`.
-
-Receive and Send operations may be unconditional or conditional.
-
-Multiple independent communications written sequentially are accepted and
-interpreted as concurrent, but the compiler should warn and recommend explicit
-`fork` / `join`.
-
-Explicit `fork` / `join` is the preferred concurrency form.
-
-Reject communication that is not semantically independent.
-
-# Target Compiler Flow
+Use:
 
 ```text
-1. Frontend / Semantic Analysis
-2. Behavioral CSP IR
-3. Transaction Extraction + Structural Validation
-4. Conditional Communication Decomposition
-5. Dependency / Validity Analysis + Semantic Validation
-6. Asynchronous Microarchitecture Lowering
-7. Structural RTL Backend
+docs/supported_architectures.md
+docs/communication_decomposition.md
+docs/four_phase_bundled_data_backend.md
+docs/compiler_flow.md
+docs/verification_plan.md
 ```
 
-This flow is authoritative.
+Responsibilities:
+
+```text
+supported_architectures.md
+    source programs accepted/rejected
+
+communication_decomposition.md
+    conditional Receive/Send semantics
+
+four_phase_bundled_data_backend.md
+    M6 hardware topology and implementation boundary
+
+compiler_flow.md
+    compiler-stage responsibilities
+
+verification_plan.md
+    required tests
+```
+
+Do not duplicate architecture rules across documents.
+
+# Compiler Rules
+
+- Use `pyslang` for SystemVerilog parsing.
+- Preserve exact Channel, variable, expression, width, and source identities.
+- Fail closed on unsupported or unresolved semantics.
+- Do not silently resize, truncate, extend, or reinterpret payloads.
+- Keep hardware architecture decisions out of frontend and behavioral IR.
+- M6 owns hardware topology.
+- M7 only binds and emits the M6-selected topology.
+- Do not infer target architecture from current Python or RTL.
+- Treat `reference/` as read-only reference material.
+
+# Backend Rule
+
+For M6/M7 work, use
+`docs/four_phase_bundled_data_backend.md` as the authoritative hardware
+specification.
+
+Ordinary BODY control and storage are structural.
+
+User combinational logic may remain behavioral/continuous RTL.
+
+EN_RECV and EN_SEND remain physical micropipeline stages, but their controllers
+may remain behavioral until their final control circuits are defined.
+
+Matched-delay realization remains a technology-binding concern.
+
+Conditional-split stages are not part of the current backend.
 
 # Conditional Communication
 
-Source level:
-
-```text
-conditional Receive
-conditional Send
-```
-
-After decomposition:
+M4 produces:
 
 ```text
 BODY
-enable
-EN_RECV
-EN_SEND
++
+logical Enable
++
+EN_RECV / EN_SEND
 ```
 
-At M4, `Enable` is an abstract logical condition. Do not assume it must be a
-wire, Channel, or specific handshake mechanism at that phase. The current M6
-backend realizes each Enable as a one-bit four-phase bundled-data Channel:
-BODY unconditionally sends exactly one enable token per transaction to its
-corresponding EN_RECV or EN_SEND stage. Enable Channels are BODY control
-outputs, not ordinary post-join data outputs; EN_RECV must receive its enable
-without waiting for the BODY input communication that it controls.
+BODY-side communication is unconditional.
 
-`BODY` is used only after decomposition and contains:
+The current backend realizes each Enable as a one-bit four-phase bundled-data
+Channel to its corresponding EN stage.
+
+EN_RECV:
 
 ```text
-unconditional Channel Receive(s)
-combinational logic
-unconditional Channel Send(s)
-enable generation
+enable=1 -> external Receive -> real BODY payload
+enable=0 -> external untouched -> dummy/InvalidPayload BODY payload
 ```
 
-For conditional Receive:
+EN_SEND:
 
 ```text
-enable = 1:
-    EN_RECV performs external Receive
-    BODY receives real data
-
-enable = 0:
-    external Channel remains untouched
-    BODY receives dummy / invalid data
+always consume BODY payload
+enable=1 -> external Send
+enable=0 -> suppress external Send
 ```
 
-The BODY-side Receive is always unconditional.
-
-EN_RECV is a separate micropipeline stage. At enable=0 it emits one
-InvalidPayload/dummy BODY token; at enable=1 it performs the external Receive
-and emits the real payload.
-
-For conditional Send:
-
-```text
-enable = 1:
-    EN_SEND performs external Send
-
-enable = 0:
-    EN_SEND suppresses external communication
-```
-
-The BODY-side Send is always unconditional.
-
-EN_SEND is a separate micropipeline stage. It always consumes the BODY token;
-at enable=1 it performs the external Send, and at enable=0 it ignores the
-payload and synthesizes no extra dummy token.
+Detailed semantics remain in `communication_decomposition.md`.
 
 # Validation Rules
-
-Fail closed on unsupported source.
 
 Reject at least:
 
@@ -133,77 +116,30 @@ Receive -> Send -> Receive
 Receive after computation begins
 dependent Receive
 repeated endpoint communication
-invalid use of conditionally received data
+invalid conditional receive data use
 other non-independent communication
 ```
 
-Do not silently reinterpret unsupported source.
+# Development Rule
 
-# Compiler Rules
+Work tests-first and in compiler-flow order.
 
-- Use `pyslang` for SystemVerilog parsing.
-- Keep parser representation separate from compiler-owned IR.
-- Preserve exact Channel, variable, expression, width, and source identities.
-- Do not silently resize, truncate, extend, or reinterpret payloads.
-- Keep hardware architecture decisions out of frontend and behavioral IR.
-- Keep RTL emission free of new architecture decisions.
-- Treat `reference/` as read-only reference material.
-- Add or update tests before modifying each compiler milestone.
-
-# Development Order
-
-Work strictly in compiler-flow order:
+Before modifying implementation:
 
 ```text
-M1  Frontend / Semantic Analysis
-M2  Behavioral CSP IR
-M3  Transaction Extraction + Structural Validation
-M4  Conditional Communication Decomposition
-M5  Dependency / Validity + Semantic Validation
-M6  Asynchronous Microarchitecture Lowering
-M7  Structural RTL Backend
+read only the relevant authoritative specification
+add/update focused tests
+make the smallest implementation change
+run focused tests
+run full regression
 ```
 
-For each milestone:
-
-```text
-define expected behavior
--> add/update tests
--> modify implementation
--> run regression
--> proceed only when stable
-```
-
-Avoid redesigning later phases while an earlier milestone is still being
-migrated.
-
-# Authoritative Documentation
-
-Read only the relevant target-spec documents:
-
-```text
-docs/supported_architectures.md
-docs/compiler_flow.md
-docs/communication_decomposition.md
-docs/verification_plan.md
-```
-
-Use:
-
-- `supported_architectures.md` for accepted/rejected source structures;
-- `compiler_flow.md` for phase responsibilities;
-- `communication_decomposition.md` for EN_RECV / EN_SEND semantics;
-- `verification_plan.md` for milestone tests and completion criteria.
+Do not redesign later phases to make an earlier failure disappear.
 
 # Development Commands
 
 ```bash
 source .venv/bin/activate
-```
-
-On June:
-
-```bash
 export PATH=/home/cli78217/local/bin:$PATH
 pytest -q
 ```
