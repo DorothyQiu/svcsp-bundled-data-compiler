@@ -75,6 +75,10 @@ class _Analyzer:
         # object identity: a local declaration with the same spelling is not
         # an external input.
         self.external_inputs = transaction.behavioral.external_inputs
+        self.local_variables = {
+            id(variable): variable
+            for variable in transaction.behavioral.variables
+        }
         self.dependencies: list[SemanticDependency] = []
         self._dependency_keys: set[tuple[object, object, SemanticDependencyKind]] = set()
         self.validity = tuple(
@@ -84,8 +88,108 @@ class _Analyzer:
         )
 
     def run(self) -> SemanticallyValidatedTransaction:
+        self._validate_whole_variable_targets(self.decomposed.transaction.behavioral.body)
+        self._validate_concurrent_receive_targets()
         self._process(self.decomposed.transaction.behavioral.body, (), {}, frozenset())
         return SemanticallyValidatedTransaction(self.decomposed, tuple(self.dependencies), self.validity)
+
+    def _validate_whole_variable_targets(self, process: behavioral.Process) -> None:
+        if isinstance(process, (behavioral.Receive, behavioral.Assign)):
+            if isinstance(process.target, behavioral.Expression) and process.target.form == 'select':
+                raise SemanticValidationError('R9A does not support selected lvalue targets')
+            return
+        if isinstance(process, behavioral.Sequence):
+            for item in process.items:
+                self._validate_whole_variable_targets(item)
+            return
+        if isinstance(process, behavioral.Parallel):
+            for branch in process.branches:
+                self._validate_whole_variable_targets(branch)
+            return
+        if isinstance(process, behavioral.If):
+            self._validate_whole_variable_targets(process.then_branch)
+            self._validate_whole_variable_targets(process.else_branch)
+
+    def _validate_concurrent_receive_targets(self) -> None:
+        targets: list[behavioral.Variable] = []
+        for body_receive in self.decomposed.body_receives:
+            target = _target_variable(body_receive.source.operation.target)
+            if target is None:
+                raise SemanticValidationError('cannot establish Receive target variable')
+            if any(target is previous for previous in targets):
+                raise SemanticValidationError('concurrent Receive targets overlap')
+            targets.append(target)
+
+    def _parallel_accesses(self, process: behavioral.Process) -> dict[int, tuple[behavioral.Variable, set[str]]]:
+        """Collect exact local-variable reads and writes in one Parallel branch."""
+
+        accesses: dict[int, tuple[behavioral.Variable, set[str]]] = {}
+
+        def add(variable: behavioral.Variable | None, kind: str) -> None:
+            if variable is None:
+                return
+            local = self.local_variables.get(id(variable))
+            if local is not variable:
+                return
+            entry = accesses.get(id(variable))
+            if entry is None:
+                accesses[id(variable)] = (variable, {kind})
+            else:
+                entry[1].add(kind)
+
+        def read_expression(expression: behavioral.Expression) -> None:
+            add(expression.variable, 'read')
+            for operand in expression.operands:
+                read_expression(operand)
+
+        def visit(item: behavioral.Process) -> None:
+            if isinstance(item, behavioral.Receive):
+                add(_target_variable(item.target), 'write')
+                for selector in item.channel.selectors:
+                    read_expression(selector)
+                return
+            if isinstance(item, behavioral.Assign):
+                add(_target_variable(item.target), 'write')
+                read_expression(item.value)
+                return
+            if isinstance(item, behavioral.Send):
+                read_expression(item.value)
+                for selector in item.channel.selectors:
+                    read_expression(selector)
+                return
+            if isinstance(item, behavioral.If):
+                read_expression(item.condition)
+                visit(item.then_branch)
+                visit(item.else_branch)
+                return
+            if isinstance(item, behavioral.Sequence):
+                for child in item.items:
+                    visit(child)
+                return
+            if isinstance(item, behavioral.Parallel):
+                for branch in item.branches:
+                    visit(branch)
+
+        visit(process)
+        return accesses
+
+    def _validate_parallel_noninterference(self, process: behavioral.Parallel) -> None:
+        branches = [self._parallel_accesses(branch) for branch in process.branches]
+        for index, left in enumerate(branches):
+            for right in branches[index + 1:]:
+                for variable_id, (variable, left_kinds) in left.items():
+                    right_entry = right.get(variable_id)
+                    if right_entry is None or right_entry[0] is not variable:
+                        continue
+                    right_kinds = right_entry[1]
+                    if 'write' in left_kinds and ({'read', 'write'} & right_kinds):
+                        raise SemanticValidationError(
+                            f'Parallel combinational branches conflict on variable {variable.name}'
+                        )
+                    if 'write' in right_kinds and ({'read', 'write'} & left_kinds):
+                        raise SemanticValidationError(
+                            f'Parallel combinational branches conflict on variable {variable.name}'
+                        )
 
     def _edge(self, source: RegionOperation | Enable, target: RegionOperation | Enable,
               kind: SemanticDependencyKind) -> None:
@@ -105,6 +209,7 @@ class _Analyzer:
                 current = self._process(item, path + (index,), current, guard)
             return current
         if isinstance(process, behavioral.Parallel):
+            self._validate_parallel_noninterference(process)
             branches = [self._process(branch, path + ('parallel', index), _copy_definitions(definitions), guard)
                         for index, branch in enumerate(process.branches)]
             return _merge_definitions(branches) if branches else definitions

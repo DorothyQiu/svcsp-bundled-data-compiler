@@ -19,8 +19,10 @@ from svcsp_compiler.behavioral_ir import (
     Skip,
     SourceLocation,
     Variable,
+    lower_behavioral,
 )
 from svcsp_compiler.communication_decomposition import decompose_transaction
+from svcsp_compiler.frontend import parse_text
 from svcsp_compiler.semantic_analysis import (
     ReceiveValidity,
     SemanticDependencyKind,
@@ -104,6 +106,10 @@ def _decompose(program: _Program, body):
 
 def _analyze(program: _Program, body) -> SemanticallyValidatedTransaction:
     return analyze_semantics(_decompose(program, body))
+
+
+def _analyze_source(source: str) -> SemanticallyValidatedTransaction:
+    return analyze_semantics(decompose_transaction(extract_transaction(lower_behavioral(parse_text(source)))))
 
 
 def test_independent_sequential_receives_have_dataflow_without_receive_ordering() -> None:
@@ -341,7 +347,7 @@ def test_parallel_receive_enable_cannot_depend_on_another_receive_payload() -> N
         program.send("C", Expression("literal", value="1'b0")),
     ))
 
-    with pytest.raises(SemanticValidationError, match="no reaching local definition"):
+    with pytest.raises(SemanticValidationError, match="Parallel combinational branches conflict"):
         _analyze(program, body)
 
 
@@ -465,3 +471,115 @@ def test_same_name_local_variable_is_not_an_external_input_by_identity() -> None
 
     with pytest.raises(SemanticValidationError, match="no reaching local definition"):
         analyze_semantics(decompose_transaction(extract_transaction(module)))
+
+
+def test_same_target_concurrent_receives_are_rejected() -> None:
+    with pytest.raises(SemanticValidationError, match="concurrent Receive targets overlap"):
+        _analyze_source('''module m(interface A, B, C); logic x; always begin
+            A.Receive(x); B.Receive(x); C.Send(x);
+        end endmodule''')
+
+
+def test_distinct_concurrent_receives_remain_legal() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        program.send("C", program.name("a")),
+    ))
+
+    _analyze(program, body)
+
+
+def test_parallel_whole_variable_write_write_conflict_is_rejected() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        Parallel((
+            program.assign("y", program.name("a")),
+            program.assign("y", program.name("b")),
+        )),
+        program.send("C", program.name("y")),
+    ))
+
+    with pytest.raises(SemanticValidationError, match="Parallel combinational branches conflict"):
+        _analyze(program, body)
+
+
+@pytest.mark.parametrize("branches", (
+    lambda program: (
+        program.assign("y", program.name("a")),
+        program.assign("z", program.name("y")),
+    ),
+    lambda program: (
+        program.assign("z", program.name("y")),
+        program.assign("y", program.name("a")),
+    ),
+), ids=("write_read", "read_write"))
+def test_parallel_whole_variable_read_write_conflicts_are_rejected(branches) -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        program.receive("Y", "y"),
+        Parallel(branches(program)),
+        program.send("C", program.name("z")),
+    ))
+
+    with pytest.raises(SemanticValidationError, match="Parallel combinational branches conflict"):
+        _analyze(program, body)
+
+
+def test_parallel_disjoint_writes_and_shared_reads_remain_legal() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        Parallel((
+            program.assign("y", program.name("a")),
+            program.assign("z", program.name("a")),
+        )),
+        program.send("C", program.name("y")),
+        program.send("D", program.name("z")),
+    ))
+
+    _analyze(program, body)
+
+
+def test_sequential_reassignment_and_guarded_definitions_remain_legal() -> None:
+    program = _Program()
+    sequential = Sequence((
+        program.receive("A", "a"),
+        program.assign("y", program.name("a")),
+        program.assign("y", Expression("unary", operator="~", operands=(program.name("y"),))),
+        program.send("B", program.name("y")),
+    ))
+    guarded = Sequence((
+        program.receive("A", "a"),
+        If(program.condition("sel"), program.assign("y", program.name("a")),
+           program.assign("y", Expression("literal", value="1'b0"))),
+        program.send("B", program.name("y")),
+    ))
+
+    _analyze(program, sequential)
+    _analyze(program, guarded)
+
+
+@pytest.mark.parametrize("source", (
+    '''module m(Channel #(1) A, B); logic x; always begin
+        A.Receive(x[0]); B.Send(x[0]);
+    end endmodule''',
+    '''module m(Channel #(1) A, B); logic a, x; always begin
+        A.Receive(a); x[0] = a; B.Send(a);
+    end endmodule''',
+), ids=("receive_target", "assign_target"))
+def test_selected_lvalue_targets_are_temporarily_rejected(source: str) -> None:
+
+    with pytest.raises(SemanticValidationError, match="R9A does not support selected lvalue targets"):
+        _analyze_source(source)
+
+
+def test_selected_rvalue_send_expression_remains_legal() -> None:
+    _analyze_source('''module m(Channel #(1) A, B); logic x; always begin
+        A.Receive(x); B.Send(x[0]);
+    end endmodule''')
