@@ -8,7 +8,11 @@ from svcsp_compiler.async_microarchitecture import (
     CombinationalBlock,
     EnableAvailability,
     EnableChannel,
+    EnReceiveMatchedDelayRequirement,
+    EnReceiveStorageSlot,
     EnReceiveStage,
+    EnSendMatchedDelayRequirement,
+    EnSendStorageSlot,
     EnSendStage,
     HandshakeProtocol,
     InputAckDirectConnection,
@@ -451,8 +455,8 @@ def test_en_receive_stage_contract_is_enable_first_conditional_external_and_unco
     assert stage.external_receive_when_enabled is True
     assert stage.body_output_unconditional is True
     assert stage.disabled_payload is stage.body_receive.disabled_payload
-    assert stage.requires_payload_storage is True
-    assert stage.requires_body_output_matched_delay is True
+    assert not hasattr(stage, "requires_payload_storage")
+    assert not hasattr(stage, "requires_body_output_matched_delay")
 
 
 def test_en_send_stage_contract_always_consumes_body_and_only_delays_enabled_external_output() -> None:
@@ -471,9 +475,72 @@ def test_en_send_stage_contract_always_consumes_body_and_only_delays_enabled_ext
     assert stage.locally_consumes_when_disabled is True
     assert not hasattr(stage, "disabled_payload")
     assert not hasattr(stage, "invalid_payload")
-    assert stage.requires_payload_storage is True
-    assert stage.requires_enabled_external_output_matched_delay is True
+    assert not hasattr(stage, "requires_payload_storage")
+    assert not hasattr(stage, "requires_enabled_external_output_matched_delay")
     assert not hasattr(stage, "requires_disabled_output_matched_delay")
+
+
+def test_en_receive_resources_are_one_per_stage_and_identify_its_exact_body_input() -> None:
+    program = _Program()
+    receive = program.receive("A", "a")
+    architecture = _lower(program, Sequence((
+        If(program.name("select"), receive, Skip()),
+        program.send("B", Expression("literal", value="1'b1")),
+    )))
+
+    stage = architecture.en_receive_stages[0]
+    assert len(architecture.en_receive_storage) == 1
+    assert len(architecture.en_receive_matched_delays) == 1
+    storage = architecture.en_receive_storage[0]
+    delay = architecture.en_receive_matched_delays[0]
+    assert isinstance(storage, EnReceiveStorageSlot)
+    assert storage.stage is stage
+    assert storage.input_port is stage.input_port
+    assert isinstance(delay, EnReceiveMatchedDelayRequirement)
+    assert delay.stage is stage
+    assert delay.input_port is stage.input_port
+    assert delay.storage_slot is storage
+    assert delay.value is None
+
+
+def test_en_send_resources_are_one_per_stage_and_identify_its_exact_body_output() -> None:
+    program = _Program()
+    send = program.send("B", Expression("literal", value="1'b0"))
+    architecture = _lower(program, Sequence((
+        program.receive("A", "a"),
+        If(program.name("select"), send, Skip()),
+    )))
+
+    stage = architecture.en_send_stages[0]
+    assert len(architecture.en_send_storage) == 1
+    assert len(architecture.en_send_matched_delays) == 1
+    storage = architecture.en_send_storage[0]
+    delay = architecture.en_send_matched_delays[0]
+    assert isinstance(storage, EnSendStorageSlot)
+    assert storage.stage is stage
+    assert storage.output_port is stage.output_port
+    assert isinstance(delay, EnSendMatchedDelayRequirement)
+    assert delay.stage is stage
+    assert delay.output_port is stage.output_port
+    assert delay.storage_slot is storage
+    assert delay.value is None
+
+
+def test_en_resources_are_separate_from_ordinary_body_storage_and_matched_delays() -> None:
+    program = _Program()
+    architecture = _lower(program, Sequence((
+        If(program.name("select"), program.receive("A", "a"), Skip()),
+        If(program.name("select"), program.send("B", program.name("a")), Skip()),
+    )))
+
+    assert len(architecture.storage.slots) == len(architecture.output_ports) == 1
+    assert len(architecture.matched_delays) == len(architecture.output_ports) == 1
+    assert isinstance(architecture.storage.slots[0], StorageSlot)
+    assert isinstance(architecture.matched_delays[0], MatchedDelayRequirement)
+    assert len(architecture.en_receive_storage) == len(architecture.en_receive_stages) == 1
+    assert len(architecture.en_receive_matched_delays) == len(architecture.en_receive_stages) == 1
+    assert len(architecture.en_send_storage) == len(architecture.en_send_stages) == 1
+    assert len(architecture.en_send_matched_delays) == len(architecture.en_send_stages) == 1
 
 
 def test_enable_stage_contracts_preserve_the_selected_half_buffer_four_phase_bundled_data_target() -> None:

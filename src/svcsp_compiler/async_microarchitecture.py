@@ -113,8 +113,6 @@ class EnReceiveStage:
     consumes_enable_first: bool = True
     external_receive_when_enabled: bool = True
     body_output_unconditional: bool = True
-    requires_payload_storage: bool = True
-    requires_body_output_matched_delay: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,8 +128,46 @@ class EnSendStage:
     external_send_when_enabled: bool = True
     suppresses_external_when_disabled: bool = True
     locally_consumes_when_disabled: bool = True
-    requires_payload_storage: bool = True
-    requires_enabled_external_output_matched_delay: bool = True
+
+
+@dataclass(frozen=True)
+class EnReceiveStorageSlot:
+    """Structural payload storage for one EN_RECV BODY output."""
+
+    id: str
+    stage: EnReceiveStage
+    input_port: InputPort
+
+
+@dataclass(frozen=True)
+class EnReceiveMatchedDelayRequirement:
+    """Matched delay on one EN_RECV's outgoing BODY request."""
+
+    id: str
+    stage: EnReceiveStage
+    input_port: InputPort
+    storage_slot: EnReceiveStorageSlot
+    value: None = None
+
+
+@dataclass(frozen=True)
+class EnSendStorageSlot:
+    """Structural payload storage for one EN_SEND external output."""
+
+    id: str
+    stage: EnSendStage
+    output_port: OutputPort
+
+
+@dataclass(frozen=True)
+class EnSendMatchedDelayRequirement:
+    """Matched delay on one enabled EN_SEND external request."""
+
+    id: str
+    stage: EnSendStage
+    output_port: OutputPort
+    storage_slot: EnSendStorageSlot
+    value: None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +238,10 @@ class AsyncMicroarchitecture:
     enable_channels: tuple[EnableChannel, ...]
     en_receive_stages: tuple[EnReceiveStage, ...]
     en_send_stages: tuple[EnSendStage, ...]
+    en_receive_storage: tuple[EnReceiveStorageSlot, ...]
+    en_receive_matched_delays: tuple[EnReceiveMatchedDelayRequirement, ...]
+    en_send_storage: tuple[EnSendStorageSlot, ...]
+    en_send_matched_delays: tuple[EnSendMatchedDelayRequirement, ...]
 
 
 def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> AsyncMicroarchitecture:
@@ -243,6 +283,8 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
     enable_channels, en_receive_stages, en_send_stages = _enable_stages(
         validated, decomposed.en_receives, decomposed.en_sends, inputs, outputs,
     )
+    en_receive_storage, en_receive_matched_delays = _en_receive_resources(en_receive_stages)
+    en_send_storage, en_send_matched_delays = _en_send_resources(en_send_stages)
     return AsyncMicroarchitecture(
         validated,
         HandshakeProtocol.FOUR_PHASE,
@@ -261,6 +303,10 @@ def lower_microarchitecture(validated: SemanticallyValidatedTransaction) -> Asyn
         enable_channels,
         en_receive_stages,
         en_send_stages,
+        en_receive_storage,
+        en_receive_matched_delays,
+        en_send_storage,
+        en_send_matched_delays,
     )
 
 
@@ -310,6 +356,36 @@ def _enable_stages(validated: SemanticallyValidatedTransaction,
         ))
 
     return tuple(channels), tuple(receive_stages), tuple(send_stages)
+
+
+def _en_receive_resources(stages: tuple[EnReceiveStage, ...]) -> tuple[
+        tuple[EnReceiveStorageSlot, ...], tuple[EnReceiveMatchedDelayRequirement, ...]]:
+    storage = tuple(
+        EnReceiveStorageSlot(f'en_receive_storage_{index}', stage, stage.input_port)
+        for index, stage in enumerate(stages)
+    )
+    delays = tuple(
+        EnReceiveMatchedDelayRequirement(
+            f'en_receive_matched_delay_{index}', stage, stage.input_port, storage_slot,
+        )
+        for index, (stage, storage_slot) in enumerate(zip(stages, storage))
+    )
+    return storage, delays
+
+
+def _en_send_resources(stages: tuple[EnSendStage, ...]) -> tuple[
+        tuple[EnSendStorageSlot, ...], tuple[EnSendMatchedDelayRequirement, ...]]:
+    storage = tuple(
+        EnSendStorageSlot(f'en_send_storage_{index}', stage, stage.output_port)
+        for index, stage in enumerate(stages)
+    )
+    delays = tuple(
+        EnSendMatchedDelayRequirement(
+            f'en_send_matched_delay_{index}', stage, stage.output_port, storage_slot,
+        )
+        for index, (stage, storage_slot) in enumerate(zip(stages, storage))
+    )
+    return storage, delays
 
 
 def _matched_delays(combinational: tuple[RegionOperation, ...], storage: StageStorage,
