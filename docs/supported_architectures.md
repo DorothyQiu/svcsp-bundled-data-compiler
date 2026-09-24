@@ -123,7 +123,7 @@ generated module parameter list.
 ```systemverilog
 always begin
     A.Receive(a);
-    b = f(a);
+    b = ~a;
     B.Send(b);
 end
 ```
@@ -135,7 +135,7 @@ always begin
     A.Receive(a);
     B.Receive(b);
 
-    c = f(a, b);
+    c = a + b;
 
     C.Send(c);
 end
@@ -161,8 +161,8 @@ Explicit `fork` / `join` is the preferred form.
 always begin
     A.Receive(a);
 
-    c = f(a);
-    d = g(a);
+    c = a;
+    d = ~a;
 
     C.Send(c);
     D.Send(d);
@@ -338,12 +338,15 @@ if (sel)
     A.Receive(a);
 
 if (sel)
-    y = f(a);
+    y = ~a;
 else
-    y = DEFAULT_VALUE;
+    y = fallback;
 
 B.Send(y);
 ```
+
+Here `fallback` is an explicit external input, or another matching-width local
+value already valid when `sel` is false.
 
 Invalid example:
 
@@ -351,7 +354,7 @@ Invalid example:
 if (sel)
     A.Receive(a);
 
-y = f(a);
+y = ~a;
 
 B.Send(y);
 ```

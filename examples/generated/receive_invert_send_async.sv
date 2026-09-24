@@ -1,4 +1,5 @@
 module receive_invert_send (
+    input logic reset_n,
     input logic channel_A_receive_request,
     output logic channel_A_receive_acknowledge,
     input logic [7:0] channel_A_receive_payload,
@@ -8,69 +9,59 @@ module receive_invert_send (
 );
   logic [7:0] body_var_0_a;
   logic [7:0] body_var_1_y;
-  logic input_join_control;
-  logic [7:0] storage_0_data;
-  logic stage_complete;
-  logic input_join_req;
-  logic input_join_ack;
+  logic input_0_body_req;
+  logic input_0_body_ack;
+  logic [7:0] receive_value_0;
+  logic base_Lreq;
+  logic base_Lack;
+  logic base_raw_Rreq;
+  logic base_Rack;
+  logic storage_enable;
   logic [7:0] storage_0_data_in;
   logic [7:0] storage_0_data_out;
-  logic output_fork_launch;
-  logic output_fork_complete;
-  logic output_0_raw_launch;
-  logic output_0_launch;
-  logic output_0_complete;
+  logic output_0_raw_req;
+  logic output_0_req;
+  logic output_0_ack;
 
-  assign input_join_req = channel_A_receive_request;
-  assign channel_A_receive_acknowledge = input_join_ack;
-  assign body_var_0_a = channel_A_receive_payload;
+  assign input_0_body_req = channel_A_receive_request;
+  assign channel_A_receive_acknowledge = input_0_body_ack;
+  assign receive_value_0 = channel_A_receive_payload;
+  assign base_Lreq = input_0_body_req;
+  assign input_0_body_ack = base_Lack;
   assign storage_0_data_in = body_var_1_y;
-  assign body_var_1_y = (~body_var_0_a);
-  // source: assign combinational_1_value = (~body_var_0_a);
-  assign channel_B_send_request = output_0_launch;
+  assign channel_B_send_request = output_0_req;
+  assign output_0_ack = channel_B_send_acknowledge;
   assign channel_B_send_payload = storage_0_data_out;
-  assign output_0_complete = channel_B_send_acknowledge;
-  assign output_0_raw_launch = output_fork_launch;
-  assign output_fork_complete = output_0_complete;
+  assign output_0_raw_req = base_raw_Rreq;
+  assign base_Rack = output_0_ack;
 
-  // four_phase_input_join input_join
-  four_phase_input_join #(
-    .N(1)
-  ) input_join (
-    .input_req(input_join_req),
-    .input_ack(input_join_ack),
-    .stage_release(stage_complete),
-    .stage_active(input_join_control)
+  always_comb begin
+    body_var_0_a = 'x;
+    body_var_1_y = 'x;
+    body_var_0_a = receive_value_0;
+    body_var_1_y = (~body_var_0_a);
+  end
+
+  four_phase_half_buffer_controller base_controller (
+    .reset_n(reset_n),
+    .base_Lreq(base_Lreq),
+    .base_Rack(base_Rack),
+    .base_Lack(base_Lack),
+    .base_raw_Rreq(base_raw_Rreq),
+    .storage_enable(storage_enable)
   );
 
-  // bundled_data_storage storage_0
-  bundled_data_storage #(
+  // bundled_data_latch_bank storage_0
+  bundled_data_latch_bank #(
     .WIDTH(8)
   ) storage_0 (
     .data_in(storage_0_data_in),
     .data_out(storage_0_data_out),
-    .capture(input_join_control),
-    .stage_release(stage_complete)
-  );
-
-  // four_phase_output_fork output_fork
-  four_phase_output_fork #(
-    .M(1)
-  ) output_fork (
-    .stage_active(input_join_control),
-    .launch(output_fork_launch)
-  );
-
-  // four_phase_output_completion output_completion
-  four_phase_output_completion #(
-    .M(1)
-  ) output_completion (
-    .complete(output_fork_complete),
-    .stage_release(stage_complete)
+    .storage_enable(storage_enable)
   );
 
   bundled_data_matched_delay matched_delay_0 (
-    .control_in(output_0_raw_launch),
-    .control_out(output_0_launch)
+    .control_in(output_0_raw_req),
+    .control_out(output_0_req)
   );
 endmodule

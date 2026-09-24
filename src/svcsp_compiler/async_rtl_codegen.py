@@ -161,7 +161,7 @@ def _validate_body_program(bound: BoundAsyncModule, signal_ids: set[str]) -> Non
     def target_signal(lvalue: BoundBodyLValue) -> str:
         variable = lvalue.variable
         if not isinstance(variable, behavioral.Variable):
-            raise AsyncRTLCodegenError("R9A BODY program has a selected lvalue target")
+            raise AsyncRTLCodegenError("BODY program has an unsupported lvalue target")
         _render_body_lvalue(lvalue, bound)
         signal_id = _variable_signal(variable, bound)
         if signal_id not in signal_ids:
@@ -245,7 +245,7 @@ def _emit_body_program(
     def collect(process: BoundBodyProcess) -> None:
         if isinstance(process, (BoundBodyReceiveWrite, BoundBodyAssignWrite)):
             if not isinstance(process.target, behavioral.Variable):
-                raise AsyncRTLCodegenError("R9A BODY program has a selected lvalue target")
+                raise AsyncRTLCodegenError("BODY program has an unsupported lvalue target")
             written[id(process.target)] = process.target
             return
         if isinstance(process, BoundBodySequence):
