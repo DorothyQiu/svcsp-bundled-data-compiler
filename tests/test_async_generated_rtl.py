@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from svcsp_compiler import compile_async_file
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
 from svcsp_compiler.async_rtl_codegen import emit_async_systemverilog
 from svcsp_compiler.async_template_binding import bind_async_templates
@@ -101,6 +102,12 @@ def _simulate_generated(tmp_path: Path, name: str, generated_rtl: str, testbench
         check=False,
     )
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+
+
+def _compile_source(tmp_path: Path, name: str, source: str) -> str:
+    path = tmp_path / f"{name}.sv"
+    path.write_text(source)
+    return compile_async_file(path)
 
 
 def test_generated_constant_1r1s_completes_one_four_phase_transaction(tmp_path: Path) -> None:
@@ -710,3 +717,274 @@ module tb;
   end
 endmodule
 """)
+
+
+@pytest.mark.parametrize(("name", "body", "first", "second"), (
+    (
+        "r9a_source_receive_assign_send",
+        "A.Receive(a); y = ~a; B.Send(y);",
+        "8'hff",
+        "8'h00",
+    ),
+    (
+        "r9a_source_receive_rewrite",
+        "A.Receive(y); y = ~y; B.Send(y);",
+        "8'hff",
+        "8'h00",
+    ),
+    (
+        "r9a_source_sequential_reassignment",
+        "A.Receive(a); y = a; y = ~y; B.Send(y);",
+        "8'hff",
+        "8'h00",
+    ),
+))
+def test_source_file_whole_variable_body_assignments_simulate_and_rearm(
+    tmp_path: Path, name: str, body: str, first: str, second: str,
+) -> None:
+    rtl = _compile_source(tmp_path, name, f'''module {name}(Channel #(8) A, B);
+logic [7:0] a, y;
+always begin {body} end
+endmodule
+''')
+
+    assert rtl.count("always_comb begin") == 1
+    assert "logic [7:0] receive_value_0;" in rtl
+    assert "assign body_var_" not in rtl
+    assert "assign input_0_body_req" in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  reg [7:0] channel_A_receive_payload = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire [7:0] channel_B_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  task transaction(input [7:0] value, input [7:0] expected);
+    begin
+      channel_A_receive_payload = value;
+      channel_A_receive_request = 1'b1;
+      wait (channel_A_receive_acknowledge === 1'b1);
+      channel_A_receive_request = 1'b0;
+      wait (channel_B_send_request === 1'b1);
+      if (channel_B_send_payload !== expected) $fatal(1, "R9A BODY output mismatch");
+      channel_B_send_acknowledge = 1'b1;
+      wait (channel_B_send_request === 1'b0);
+      channel_B_send_acknowledge = 1'b0;
+      wait (channel_A_receive_acknowledge === 1'b0);
+    end
+  endtask
+  initial begin #200; $fatal(1, "R9A BODY deadlock"); end
+  initial begin
+    transaction(8'h00, {first});
+    transaction(8'hff, {second});
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+def test_source_file_if_else_and_nested_guarded_assignments_simulate(tmp_path: Path) -> None:
+    name = "r9a_source_nested_assignments"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(
+input logic sel, outer_guard, inner_guard, Channel #(8) A, B);
+logic [7:0] a, y;
+always begin
+  A.Receive(a);
+  if (sel)
+    if (outer_guard) y = a;
+    else y = ~a;
+  else
+    if (inner_guard) y = a;
+    else y = ~a;
+  B.Send(y);
+end
+endmodule
+''')
+    assert rtl.count("always_comb begin") == 1
+    assert "assign body_var_" not in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, sel = 0, outer_guard = 0, inner_guard = 0;
+  reg channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  reg [7:0] channel_A_receive_payload = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire [7:0] channel_B_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  task transaction(input [7:0] value, input outer_value, input inner_value,
+                   input select_value, input [7:0] expected);
+    begin
+      outer_guard = outer_value; inner_guard = inner_value; sel = select_value;
+      channel_A_receive_payload = value; channel_A_receive_request = 1'b1;
+      wait (channel_A_receive_acknowledge === 1'b1);
+      channel_A_receive_request = 1'b0;
+      wait (channel_B_send_request === 1'b1);
+      if (channel_B_send_payload !== expected) $fatal(1, "nested guarded assignment");
+      channel_B_send_acknowledge = 1'b1;
+      wait (channel_B_send_request === 1'b0);
+      channel_B_send_acknowledge = 1'b0;
+      wait (channel_A_receive_acknowledge === 1'b0);
+    end
+  endtask
+  initial begin #300; $fatal(1, "nested guarded assignment deadlock"); end
+  initial begin
+    transaction(8'h12, 1'b1, 1'b0, 1'b1, 8'h12);
+    transaction(8'h12, 1'b0, 1'b0, 1'b1, 8'hed);
+    transaction(8'h12, 1'b0, 1'b1, 1'b0, 8'h12);
+    transaction(8'h12, 1'b0, 1'b0, 1'b0, 8'hed);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+def test_source_file_conditional_receive_fallback_simulates(tmp_path: Path) -> None:
+    name = "r9a_source_conditional_receive_fallback"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(input logic sel, Channel #(1) A, B);
+logic a, y;
+always begin
+  if (sel) A.Receive(a);
+  if (sel) y = a; else y = sel;
+  B.Send(y);
+end
+endmodule
+''')
+    assert "assign enable_channel_0_value = !(!(sel));" in rtl
+    assert "receive_value_0" in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, sel = 1, channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  reg channel_A_receive_payload = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire channel_B_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  task complete_b(input expected);
+    begin
+      wait (channel_B_send_request === 1'b1);
+      if (channel_B_send_payload !== expected)
+        $fatal(1, "conditional Receive fallback payload expected=%b actual=%b", expected, channel_B_send_payload);
+      channel_B_send_acknowledge = 1'b1;
+      wait (channel_B_send_request === 1'b0);
+      channel_B_send_acknowledge = 1'b0;
+    end
+  endtask
+  initial begin #250; $fatal(1, "conditional Receive fallback deadlock"); end
+  initial begin
+    channel_A_receive_payload = 1'b1; channel_A_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge === 1'b1);
+    #1;
+    channel_A_receive_request = 1'b0;
+    wait (channel_A_receive_acknowledge === 1'b0);
+    complete_b(1'b1);
+    sel = 1'b0;
+    #4; if (channel_A_receive_acknowledge !== 1'b0) $fatal(1, "disabled Receive touched A");
+    complete_b(1'b0);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+def test_source_file_parallel_body_writes_simulate_multi_output_completion(tmp_path: Path) -> None:
+    name = "r9a_source_parallel_writes"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(Channel #(8) A, B, C, D);
+logic [7:0] a, b, y, z;
+always begin
+  A.Receive(a); B.Receive(b);
+  fork y = a; z = b; join
+  C.Send(y); D.Send(z);
+end
+endmodule
+''')
+    assert rtl.count("always_comb begin") == 1
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_receive_request = 0;
+  reg [7:0] channel_A_receive_payload = 0, channel_B_receive_payload = 0;
+  reg channel_C_send_acknowledge = 0, channel_D_send_acknowledge = 0;
+  wire channel_A_receive_acknowledge, channel_B_receive_acknowledge;
+  wire channel_C_send_request, channel_D_send_request;
+  wire [7:0] channel_C_send_payload, channel_D_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #250; $fatal(1, "parallel BODY deadlock"); end
+  initial begin
+    channel_A_receive_payload = 8'h12; channel_B_receive_payload = 8'h34;
+    channel_A_receive_request = 1'b1; channel_B_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge && channel_B_receive_acknowledge);
+    channel_A_receive_request = 1'b0; channel_B_receive_request = 1'b0;
+    wait (channel_C_send_request && channel_D_send_request);
+    if (channel_C_send_payload !== 8'h12 || channel_D_send_payload !== 8'h34)
+      $fatal(1, "parallel BODY payload");
+    channel_C_send_acknowledge = 1'b1;
+    #2; if (!channel_D_send_request) $fatal(1, "one output ACK completed parallel BODY");
+    channel_D_send_acknowledge = 1'b1;
+    wait (!channel_C_send_request && !channel_D_send_request);
+    channel_C_send_acknowledge = 1'b0; channel_D_send_acknowledge = 1'b0;
+    wait (!channel_A_receive_acknowledge && !channel_B_receive_acknowledge);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+@pytest.mark.parametrize(("name", "source", "declarations", "setup", "expected"), (
+    (
+        "r9a_source_external_rhs",
+        "input logic [7:0] ext, ",
+        "reg [7:0] ext = 0;",
+        "ext = 8'hc3;",
+        "8'hc3",
+    ),
+    (
+        "r9a_source_symbolic_width",
+        "",
+        "",
+        "",
+        "8'h5a",
+    ),
+))
+def test_source_file_external_rhs_and_symbolic_width_transactions(
+    tmp_path: Path, name: str, source: str, declarations: str, setup: str, expected: str,
+) -> None:
+    parameters = "#(parameter int W = 8) " if "symbolic" in name else ""
+    width = "W" if "symbolic" in name else "8"
+    body = "y = ext;" if "external" in name else "y = x;"
+    receive = "A.Receive(x);" if "symbolic" in name else "A.Receive(a);"
+    packed_range = "[W-1:0]" if "symbolic" in name else "[7:0]"
+    source_text = f'''module {name} {parameters}({source}Channel #({width}) A, B);
+logic {packed_range} {'x, y' if 'symbolic' in name else 'a, y'};
+always begin {receive} {body} B.Send(y); end
+endmodule
+'''
+    rtl = _compile_source(tmp_path, name, source_text)
+    assert ("parameter int W = 8" in rtl) if "symbolic" in name else ("input logic [7:0] ext" in rtl)
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  {declarations}
+  reg [7:0] channel_A_receive_payload = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire [7:0] channel_B_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #150; $fatal(1, "external/symbolic transaction deadlock"); end
+  initial begin
+    {setup}
+    channel_A_receive_payload = 8'h5a; channel_A_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge === 1'b1); channel_A_receive_request = 1'b0;
+    wait (channel_B_send_request === 1'b1);
+    if (channel_B_send_payload !== {expected}) $fatal(1, "external/symbolic payload");
+    channel_B_send_acknowledge = 1'b1; wait (channel_B_send_request === 1'b0);
+    channel_B_send_acknowledge = 1'b0; wait (channel_A_receive_acknowledge === 1'b0);
+    #2; $finish;
+  end
+endmodule
+''')

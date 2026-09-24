@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from svcsp_compiler import SemanticValidationError, compile_async_file
+from svcsp_compiler import FrontendError, SemanticValidationError, compile_async_file
 from svcsp_compiler.transaction import TransactionStructureError
 
 
@@ -137,4 +137,31 @@ end
 endmodule''')
 
     with pytest.raises(SemanticValidationError, match='conditional receive data'):
+        compile_async_file(source)
+
+
+@pytest.mark.parametrize(('source_text', 'error', 'match'), (
+    ('''module selected_receive(Channel #(1) A, B); logic x; always begin
+A.Receive(x[0]); B.Send(x[0]); end endmodule''',
+     SemanticValidationError, 'selected lvalue'),
+    ('''module selected_assign(Channel #(1) A, B); logic a, x; always begin
+A.Receive(a); x[0] = a; B.Send(a); end endmodule''',
+     SemanticValidationError, 'selected lvalue'),
+    ('''module same_receive(Channel #(1) A, B, C); logic x; always begin
+A.Receive(x); B.Receive(x); C.Send(x); end endmodule''',
+     SemanticValidationError, 'concurrent Receive targets overlap'),
+    ('''module parallel_conflict(Channel #(1) A, B, C); logic a, b, y; always begin
+A.Receive(a); B.Receive(b); fork y = a; y = b; join C.Send(y); end endmodule''',
+     SemanticValidationError, 'Parallel combinational branches conflict'),
+    ('''module external_receive(input logic sel, Channel #(1) A, B); always begin
+A.Receive(sel); B.Send(1'b0); end endmodule''',
+     FrontendError, 'local variable receive/assignment target'),
+))
+def test_target_entrypoint_rejects_r9a_invalid_write_and_parallel_cases(
+    tmp_path: Path, source_text: str, error: type[Exception], match: str,
+) -> None:
+    source = tmp_path / 'r9a_invalid.sv'
+    source.write_text(source_text)
+
+    with pytest.raises(error, match=match):
         compile_async_file(source)
