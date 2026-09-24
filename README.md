@@ -1,155 +1,112 @@
 # SVCSP Asynchronous Compiler
 
-Compiler from a supported subset of SystemVerilog CSP (SVCSP) to structural
-asynchronous RTL.
+This project compiles a supported SystemVerilog CSP (SVCSP) subset into
+structural asynchronous SystemVerilog RTL. The current target is a four-phase
+bundled-data half-buffer backend.
 
-Initial backend:
+## Supported transaction model
 
-```text
-four-phase bundled-data half-buffer
-```
-
-## Source Model
-
-One supported top-level process represents one transaction:
+One top-level `always` process describes one transaction:
 
 ```text
-N independent Channel Receive(s)
-              |
-              v
-      combinational logic
-              |
-              v
-M independent Channel Send(s)
+independent Channel Receive(s)
+            -> combinational BODY logic
+            -> independent Channel Send(s)
 ```
 
-with `N >= 1` and `M >= 1`.
+At least one Receive and one Send are required. Independent operations written
+sequentially are interpreted as concurrent communications; explicit
+`fork` / `join` is preferred for that intent.
 
-Receive and Send operations may be unconditional or conditional.
+Conditional Receive and Send are supported. The compiler decomposes them into
+unconditional BODY communication plus a logical Enable and an EN_RECV or
+EN_SEND stage. Conditional Receive guards may use only pre-input sources;
+conditional Send guards may additionally use valid BODY data.
 
-Independent sequentially written communications are interpreted as concurrent;
-explicit `fork` / `join` is preferred.
+R9 preserves combinational source semantics in one coherent BODY
+`always_comb` implementation: blocking-Assign order, `if` / `else` control,
+and exact lvalues are retained. BODY targets may be whole local Variables or
+static literal bit/range selects on concrete-width local Variables, such as
+`x[0]` and `x[7:4]`. Parallel BODY branches are accepted only when their data
+accesses are proven noninterfering.
 
-Ordered or multi-stage source communication is outside the current target.
+The compiler fails closed rather than infer behavior for unsupported cases,
+including ordered/multi-stage communication, dependent Receives, invalid uses
+of conditionally received data, undeclared local reads, dynamic or
+parameter-dependent data-lvalue selects, selected lvalues on symbolic-width
+Variables, dynamic Channel selection, and unsupported parameter arithmetic.
 
-## Conditional Communication
+The complete accepted/rejected subset is defined in
+[supported architectures](docs/supported_architectures.md).
 
-Conditional communication is decomposed into:
+## Compiler flow
 
 ```text
-BODY
-+
-Enable
-+
-EN_RECV / EN_SEND
+M1  Frontend parsing and source resolution
+M2  Behavioral CSP IR
+M3  Transaction extraction and structural validation
+M4  Conditional communication decomposition
+M5  Dependency, validity, and semantic validation
+M6  Asynchronous microarchitecture lowering
+M7  Structural RTL binding and emission
 ```
 
-The current backend realizes EN_RECV and EN_SEND as separate physical
-micropipeline stages.
+M6 selects the asynchronous topology; M7 binds that selected topology and
+renders RTL without inventing scheduling, storage, control channels, or state.
+See the detailed [compiler flow](docs/compiler_flow.md).
 
-See `docs/communication_decomposition.md`.
-
-## Backend
-
-Ordinary BODY stages use one canonical 1x1 half-buffer controller with
-request/acknowledgement join or fanout logic added only when required by
-multiple Channels.
-
-Implementation boundary:
+## Repository layout
 
 ```text
-ordinary control/storage     structural
-user combinational logic     behavioral/continuous RTL allowed
-EN_RECV/EN_SEND controllers  behavioral for now
-matched delay                technology-binding abstraction
+src/svcsp_compiler/  compiler implementation
+rtl_lib/             asynchronous RTL-library primitives
+examples/            compilable supported-subset source examples
+tests/               unit, flow, generated-RTL, and simulation regressions
+docs/                authoritative source and backend contracts
 ```
 
-See `docs/four_phase_bundled_data_backend.md`.
-
-## Compiler Flow
-
-```text
-SVCSP
-  |
-  v
-Frontend / Semantic Analysis
-  |
-  v
-Behavioral CSP IR
-  |
-  v
-Transaction Extraction
-  |
-  v
-Conditional Communication Decomposition
-  |
-  v
-Dependency / Validity Analysis
-  |
-  v
-Asynchronous Microarchitecture Lowering
-  |
-  v
-Structural RTL Backend
-  |
-  v
-Structural Asynchronous RTL
-```
-
-See `docs/compiler_flow.md`.
-
-## Compile a File
-
-`compile_async_file()` is the supported file-to-RTL entrypoint:
-
-```python
-from svcsp_compiler import compile_async_file
-
-rtl = compile_async_file("design.sv")
-```
-
-Regenerate the checked-in demo:
+## Install and test
 
 ```bash
 source .venv/bin/activate
-python -c "from pathlib import Path; from svcsp_compiler import compile_async_file; Path('examples/generated/receive_invert_send_async.sv').write_text(compile_async_file('examples/receive_invert_send.sv'))"
+# Generated-RTL simulation tests require iverilog and vvp on PATH.
+pytest -q
 ```
 
-The current demo compiles:
+## Compile and run examples
 
-```systemverilog
-A.Receive(a);
-y = ~a;
-B.Send(y);
+Every top-level source example in `examples/` is compiled through the complete
+flow by the lightweight examples test:
+
+```bash
+source .venv/bin/activate
+pytest -q tests/test_examples.py
 ```
 
-to generated asynchronous RTL and verifies multiple four-phase transactions
-with Icarus.
+Compile one source file programmatically:
 
-## Development Rule
-
-Unsupported source must fail explicitly rather than be silently reinterpreted.
-
-Implementation proceeds tests-first in compiler-flow order:
-
-```text
-M1 Frontend
-M2 Behavioral IR
-M3 Transaction Extraction
-M4 Communication Decomposition
-M5 Semantic Validation
-M6 Microarchitecture
-M7 RTL Backend
+```bash
+python -c "from pathlib import Path; from svcsp_compiler import compile_async_file; Path('/tmp/receive_invert_send_async.sv').write_text(compile_async_file('examples/receive_invert_send.sv'))"
 ```
 
-## Documentation
+`examples/generated/receive_invert_send_async.sv` is the checked-in output for
+that source. Run the generated-RTL Icarus simulations with:
 
-Authoritative specifications:
+```bash
+# iverilog and vvp must be on PATH.
+pytest -q tests/test_async_generated_rtl.py
+```
 
-- `docs/supported_architectures.md` — accepted and rejected source structures
-- `docs/communication_decomposition.md` — conditional communication semantics
-- `docs/four_phase_bundled_data_backend.md` — backend hardware architecture
-- `docs/compiler_flow.md` — compiler-stage responsibilities
-- `docs/verification_plan.md` — implementation and regression checklist
+Examples include simple passthrough, parallel join/compute/send, conditional
+Receive fallback, conditional Send, symbolic parameter widths, and static
+selected lvalues.
 
-Developer rules are in `AGENTS.md`.
+## Detailed documentation
+
+- [Supported source architectures](docs/supported_architectures.md)
+- [Conditional communication decomposition](docs/communication_decomposition.md)
+- [Four-phase bundled-data backend](docs/four_phase_bundled_data_backend.md)
+- [Compiler-stage responsibilities](docs/compiler_flow.md)
+- [Verification plan](docs/verification_plan.md)
+
+Developer workflow rules are in [AGENTS.md](AGENTS.md).
