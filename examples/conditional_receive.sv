@@ -1,12 +1,11 @@
-module conditional_receive(interface Control, L, R);
-  bit enable;
+module conditional_receive(input logic sel, input logic [7:0] fallback,
+                           Channel #(8) L, R);
   logic [7:0] data;
   always begin
-    Control.Receive(enable);
-    if (enable)
+    if (sel)
       L.Receive(data);
     else
-      data = 0;
+      data = fallback;
     R.Send(data);
   end
 endmodule

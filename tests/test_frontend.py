@@ -17,7 +17,7 @@ def directions(result):
     ('simple_buffer', {'L': 'input', 'R': 'output'}),
     ('fork_join_adder', {'A': 'input', 'B': 'input', 'R': 'output'}),
     ('conditional_send', {'L': 'input', 'R': 'output'}),
-    ('conditional_receive', {'Control': 'input', 'L': 'input', 'R': 'output'}),
+    ('conditional_receive', {'L': 'input', 'R': 'output'}),
 ])
 def test_examples(name, expected):
     result = parse_file(EXAMPLES / f'{name}.sv')
