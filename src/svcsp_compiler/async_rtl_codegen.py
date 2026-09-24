@@ -2,7 +2,16 @@
 from __future__ import annotations
 
 from . import behavioral_ir as behavioral
-from .async_template_binding import BoundAsyncModule
+from .async_template_binding import (
+    BoundAsyncModule,
+    BoundBodyAssignWrite,
+    BoundBodyIf,
+    BoundBodyParallel,
+    BoundBodyProcess,
+    BoundBodyReceiveWrite,
+    BoundBodySequence,
+    BoundBodySkip,
+)
 
 
 class AsyncRTLCodegenError(ValueError):
@@ -47,6 +56,12 @@ def emit_async_systemverilog(bound: BoundAsyncModule) -> str:
             path = assignment.source.path
             if path and isinstance(path[-1], int):
                 lines.append(f"  // source: assign combinational_{path[-1]}_value = {rhs};")
+
+    if bound.body_program is None:
+        raise AsyncRTLCodegenError("bound module lacks a BODY program")
+    if bound.assignments:
+        lines.append("")
+    _emit_body_program(lines, bound.body_program, bound)
 
     if bound.instances:
         lines.append("")
@@ -132,6 +147,149 @@ def _validate(bound: BoundAsyncModule) -> None:
         signal = next(signal for signal in bound.signals if signal.id == binding.signal_id)
         if signal.width != binding.variable.payload_type.width:
             raise AsyncRTLCodegenError(f"variable {binding.variable.name} has the wrong bound width")
+    _validate_body_program(bound, signal_ids)
+
+
+def _validate_body_program(bound: BoundAsyncModule, signal_ids: set[str]) -> None:
+    if bound.body_program is None:
+        raise AsyncRTLCodegenError("bound module lacks a BODY program")
+
+    written: dict[int, behavioral.Variable] = {}
+    receives: list[BoundBodyReceiveWrite] = []
+
+    def target_signal(variable: behavioral.Variable) -> str:
+        if not isinstance(variable, behavioral.Variable):
+            raise AsyncRTLCodegenError("R9A BODY program has a selected lvalue target")
+        signal_id = _variable_signal(variable, bound)
+        if signal_id not in signal_ids:
+            raise AsyncRTLCodegenError("BODY target Variable has an undeclared binding")
+        written[id(variable)] = variable
+        return signal_id
+
+    def visit(process: BoundBodyProcess) -> None:
+        if isinstance(process, BoundBodyReceiveWrite):
+            target_signal(process.target)
+            if process.input_port.body_receive is not process.source:
+                raise AsyncRTLCodegenError("BODY ReceiveWrite has mismatched InputPort identity")
+            if process.receive_value_signal_id not in signal_ids:
+                raise AsyncRTLCodegenError("BODY ReceiveWrite lacks a declared receive-value signal")
+            operation = process.source.source.operation
+            if not isinstance(operation, behavioral.Receive):
+                raise AsyncRTLCodegenError("BODY ReceiveWrite source is not a Receive")
+            if operation.target is not process.target:
+                raise AsyncRTLCodegenError("BODY ReceiveWrite target differs from its source Receive")
+            payload = operation.channel.payload_type or process.target.payload_type
+            signal = next(signal for signal in bound.signals if signal.id == process.receive_value_signal_id)
+            if signal.width != payload.width:
+                raise AsyncRTLCodegenError("BODY ReceiveWrite receive-value signal has the wrong width")
+            receives.append(process)
+            return
+        if isinstance(process, BoundBodyAssignWrite):
+            target_signal(process.target)
+            if not isinstance(process.source.operation, behavioral.Assign):
+                raise AsyncRTLCodegenError("BODY AssignWrite source is not an Assign")
+            if process.source.operation.target is not process.target:
+                raise AsyncRTLCodegenError("BODY AssignWrite target differs from its source Assign")
+            if process.source.operation.value is not process.expression:
+                raise AsyncRTLCodegenError("BODY AssignWrite expression differs from its source Assign")
+            return
+        if isinstance(process, BoundBodySequence):
+            for item in process.items:
+                visit(item)
+            return
+        if isinstance(process, BoundBodyIf):
+            for branch in (process.then_branch, process.else_branch):
+                visit(branch)
+            return
+        if isinstance(process, BoundBodyParallel):
+            for branch in process.branches:
+                visit(branch)
+            return
+        if isinstance(process, BoundBodySkip):
+            return
+        raise AsyncRTLCodegenError("unsupported bound BODY process")
+
+    visit(bound.body_program)
+    input_ports = bound.architecture.input_ports
+    for port in input_ports:
+        matches = [item for item in receives if item.input_port is port]
+        if len(matches) != 1:
+            raise AsyncRTLCodegenError("InputPort lacks one exact BODY ReceiveWrite")
+    receive_signal_ids = [item.receive_value_signal_id for item in receives]
+    if len(receive_signal_ids) != len(set(receive_signal_ids)):
+        raise AsyncRTLCodegenError("receive-value signal is shared by multiple InputPorts")
+    written_signal_ids = {target_signal(variable) for variable in written.values()}
+    if any(item.target_signal_id in written_signal_ids for item in bound.assignments):
+        raise AsyncRTLCodegenError(
+            "structural assignment drives a BODY variable written by body_program"
+        )
+
+
+def _emit_body_program(
+    lines: list[str],
+    program: BoundBodyProcess,
+    bound: BoundAsyncModule,
+) -> None:
+    written: dict[int, behavioral.Variable] = {}
+
+    def collect(process: BoundBodyProcess) -> None:
+        if isinstance(process, (BoundBodyReceiveWrite, BoundBodyAssignWrite)):
+            if not isinstance(process.target, behavioral.Variable):
+                raise AsyncRTLCodegenError("R9A BODY program has a selected lvalue target")
+            written[id(process.target)] = process.target
+            return
+        if isinstance(process, BoundBodySequence):
+            for item in process.items:
+                collect(item)
+            return
+        if isinstance(process, BoundBodyIf):
+            collect(process.then_branch)
+            collect(process.else_branch)
+            return
+        if isinstance(process, BoundBodyParallel):
+            for branch in process.branches:
+                collect(branch)
+            return
+        if isinstance(process, BoundBodySkip):
+            return
+        raise AsyncRTLCodegenError("unsupported bound BODY process")
+
+    def emit(process: BoundBodyProcess, indent: str) -> None:
+        if isinstance(process, BoundBodyReceiveWrite):
+            lines.append(
+                f"{indent}{_variable_signal(process.target, bound)} = {process.receive_value_signal_id};"
+            )
+            return
+        if isinstance(process, BoundBodyAssignWrite):
+            lines.append(
+                f"{indent}{_variable_signal(process.target, bound)} = {_expression(process.expression, bound)};"
+            )
+            return
+        if isinstance(process, BoundBodySequence):
+            for item in process.items:
+                emit(item, indent)
+            return
+        if isinstance(process, BoundBodyIf):
+            lines.append(f"{indent}if ({_expression(process.condition, bound)}) begin")
+            emit(process.then_branch, indent + "  ")
+            lines.append(f"{indent}end else begin")
+            emit(process.else_branch, indent + "  ")
+            lines.append(f"{indent}end")
+            return
+        if isinstance(process, BoundBodyParallel):
+            for branch in process.branches:
+                emit(branch, indent)
+            return
+        if isinstance(process, BoundBodySkip):
+            return
+        raise AsyncRTLCodegenError("unsupported bound BODY process")
+
+    collect(program)
+    lines.append("  always_comb begin")
+    for variable in written.values():
+        lines.append(f"    {_variable_signal(variable, bound)} = 'x;")
+    emit(program, "    ")
+    lines.append("  end")
 
 
 def _validate_module_parameters(

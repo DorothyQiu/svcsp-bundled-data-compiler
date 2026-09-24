@@ -97,6 +97,11 @@ class _Analyzer:
         if isinstance(process, (behavioral.Receive, behavioral.Assign)):
             if isinstance(process.target, behavioral.Expression) and process.target.form == 'select':
                 raise SemanticValidationError('R9A does not support selected lvalue targets')
+            target = process.target
+            if not isinstance(target, behavioral.Variable):
+                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
+            if self.local_variables.get(id(target)) is not target:
+                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
             return
         if isinstance(process, behavioral.Sequence):
             for item in process.items:
@@ -113,9 +118,11 @@ class _Analyzer:
     def _validate_concurrent_receive_targets(self) -> None:
         targets: list[behavioral.Variable] = []
         for body_receive in self.decomposed.body_receives:
-            target = _target_variable(body_receive.source.operation.target)
-            if target is None:
+            target = body_receive.source.operation.target
+            if not isinstance(target, behavioral.Variable):
                 raise SemanticValidationError('cannot establish Receive target variable')
+            if self.local_variables.get(id(target)) is not target:
+                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
             if any(target is previous for previous in targets):
                 raise SemanticValidationError('concurrent Receive targets overlap')
             targets.append(target)
@@ -229,9 +236,11 @@ class _Analyzer:
             enable = self.enables_by_source.get(source)
             if enable is not None:
                 self._analyze_enable(enable, definitions)
-            target = _target_variable(process.target)
-            if target is None:
+            target = process.target
+            if not isinstance(target, behavioral.Variable):
                 raise SemanticValidationError('cannot establish Receive target variable')
+            if self.local_variables.get(id(target)) is not target:
+                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
             body_receive = self.body_receives.get(source)
             if body_receive is None:
                 raise SemanticValidationError('missing M4 BODY receive')
@@ -242,9 +251,11 @@ class _Analyzer:
             return updated
         if isinstance(process, behavioral.Assign):
             self._read_expression(process.value, definitions, guard, source)
-            target = _target_variable(process.target)
-            if target is None:
+            target = process.target
+            if not isinstance(target, behavioral.Variable):
                 raise SemanticValidationError('cannot establish assignment target variable')
+            if self.local_variables.get(id(target)) is not target:
+                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
             updated = _copy_definitions(definitions)
             updated[target] = {_Definition(source, guard, guard)}
             return updated

@@ -18,6 +18,7 @@ from svcsp_compiler.behavioral_ir import (
     If,
     ONE_BIT,
     Parameter,
+    Parallel,
     PayloadType,
     PayloadWidth,
     Receive,
@@ -554,7 +555,7 @@ def test_external_widths_and_emission_order_are_deterministic() -> None:
     )
 
 
-def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_enable_payload() -> None:
+def test_structural_assignments_and_procedural_body_program_are_emitted_mechanically() -> None:
     program = _Program()
 
     expression = Expression(
@@ -613,11 +614,10 @@ def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_en
         program.variable("y"),
     )
 
-    assert (
-        f"assign {y_signal} = "
-        f"({a_signal} + 1'b1);"
-        in rtl
-    )
+    assert rtl.count("always_comb begin") == 1
+    assert f"{a_signal} = receive_value_0;" in rtl
+    assert f"{y_signal} = ({a_signal} + 1'b1);" in rtl
+    assert f"assign {y_signal} = " not in rtl
 
     assert (
         f"assign storage_0_data_in = "
@@ -643,6 +643,105 @@ def test_typed_binding_assignments_are_emitted_mechanically_for_body_send_and_en
         f"!(!({select_signal}));"
         not in rtl
     )
+
+
+def test_body_renderer_preserves_receive_rewrite_and_sequential_blocking_order() -> None:
+    program = _Program()
+    rewrite = Expression("unary", operator="~", operands=(program.name("y"),))
+    bound = _bound(program, Sequence((
+        program.receive("A", "y"),
+        Assign(program.variable("y"), rewrite),
+        program.send("B", program.name("y")),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    y_signal = _variable_signal_id(bound, program.variable("y"))
+
+    receive_write = f"{y_signal} = receive_value_0;"
+    rewrite_write = f"{y_signal} = (~{y_signal});"
+    assert rtl.count("always_comb begin") == 1
+    assert rtl.index(receive_write) < rtl.index(rewrite_write)
+    assert f"assign {y_signal} = " not in rtl
+
+
+def test_body_renderer_preserves_two_source_assignments_in_blocking_order() -> None:
+    program = _Program()
+    first = Assign(program.variable("y"), program.name("a"))
+    second = Assign(
+        program.variable("y"),
+        Expression("unary", operator="~", operands=(program.name("y"),)),
+    )
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"), first, second, program.send("B", program.name("y")),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    a_signal = _variable_signal_id(bound, program.variable("a"))
+    y_signal = _variable_signal_id(bound, program.variable("y"))
+
+    assert rtl.index(f"{y_signal} = {a_signal};") < rtl.index(f"{y_signal} = (~{y_signal});")
+    assert f"assign {y_signal} = " not in rtl
+
+
+def test_body_renderer_preserves_if_else_assignment_selection() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        If(select,
+           Assign(program.variable("y"), program.name("a")),
+           Assign(program.variable("y"), Expression("unary", operator="~", operands=(program.name("a"),)))),
+        program.send("B", program.name("y")),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    a_signal = _variable_signal_id(bound, program.variable("a"))
+    y_signal = _variable_signal_id(bound, program.variable("y"))
+
+    assert f"if (select) begin\n      {y_signal} = {a_signal};\n    end else begin\n      {y_signal} = (~{a_signal});" in rtl
+    assert f"assign {y_signal} = " not in rtl
+
+
+def test_body_renderer_preserves_if_else_conditional_receive_and_unknown_defaults() -> None:
+    program = _Program()
+    select = program.external_name("select")
+    body = Sequence((
+        If(select, program.receive("A", "a"), Skip()),
+        If(select, Assign(program.variable("y"), program.name("a")),
+           Assign(program.variable("y"), Expression("literal", value="1'b0"))),
+        program.send("B", program.name("y")),
+    ))
+    bound = _bound(program, body)
+    rtl = emit_async_systemverilog(bound)
+    a_signal = _variable_signal_id(bound, program.variable("a"))
+    y_signal = _variable_signal_id(bound, program.variable("y"))
+
+    assert f"{a_signal} = 'x;" in rtl
+    assert f"{y_signal} = 'x;" in rtl
+    assert f"if (select) begin\n      {a_signal} = receive_value_0;" in rtl
+    assert f"if (select) begin\n      {y_signal} = {a_signal};\n    end else begin\n      {y_signal} = 1'b0;" in rtl
+    assert f"assign {a_signal} = " not in rtl
+    assert f"assign {y_signal} = " not in rtl
+
+
+def test_body_renderer_deterministically_linearizes_noninterfering_parallel_writes() -> None:
+    program = _Program()
+    body = Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        Parallel((
+            Assign(program.variable("y"), program.name("a")),
+            Assign(program.variable("z"), program.name("b")),
+        )),
+        program.send("C", program.name("y")),
+        program.send("D", program.name("z")),
+    ))
+    bound = _bound(program, body)
+    rtl = emit_async_systemverilog(bound)
+    y_signal = _variable_signal_id(bound, program.variable("y"))
+    z_signal = _variable_signal_id(bound, program.variable("z"))
+    a_signal = _variable_signal_id(bound, program.variable("a"))
+    b_signal = _variable_signal_id(bound, program.variable("b"))
+
+    assert "\n    fork\n" not in rtl and "\n    join\n" not in rtl
+    assert rtl.index(f"{y_signal} = {a_signal};") < rtl.index(f"{z_signal} = {b_signal};")
 
 
 def test_expression_rendering_uses_only_m7a_bound_variable_signals() -> None:
@@ -1216,7 +1315,7 @@ endmodule
         emit_async_systemverilog(malformed)
 
 
-def test_pre_and_post_input_enable_values_are_booleanized_without_changing_data_assignments() -> None:
+def test_pre_and_post_input_enable_values_are_booleanized_without_booleanizing_body_data() -> None:
     program = _Program()
     select = program.external_name("select", _BYTE)
     bound = _bound(program, Sequence((
@@ -1233,5 +1332,6 @@ def test_pre_and_post_input_enable_values_are_booleanized_without_changing_data_
     assert f"assign {post.value_signal_id} = !(!({select_signal}));" in rtl
 
     y_signal = _variable_signal_id(bound, program.variable("y", _BYTE))
-    assert f"assign {y_signal} = 8'h3c;" in rtl
-    assert f"assign {y_signal} = !(!(8'h3c));" not in rtl
+    assert f"{y_signal} = 8'h3c;" in rtl
+    assert f"{y_signal} = !(!(8'h3c));" not in rtl
+    assert f"assign {y_signal} = " not in rtl

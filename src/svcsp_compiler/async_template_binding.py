@@ -133,6 +133,7 @@ class BoundBodyReceiveWrite:
     source: BodyReceive
     input_port: InputPort
     target: behavioral.Variable
+    receive_value_signal_id: str
 
 
 @dataclass(frozen=True)
@@ -264,11 +265,15 @@ def bind_async_templates(
     def whole_variable_target(
         target: behavioral.Variable | behavioral.Expression,
     ) -> behavioral.Variable:
-        if isinstance(target, behavioral.Variable):
-            return target
-        raise AsyncTemplateBindingError(
-            "R9A does not support selected lvalue targets"
-        )
+        if not isinstance(target, behavioral.Variable):
+            raise AsyncTemplateBindingError(
+                "R9A does not support selected lvalue targets"
+            )
+        if not any(target is local for local in behavioral_module.variables):
+            raise AsyncTemplateBindingError(
+                "R9A BODY write target must be an exact local Variable"
+            )
+        return target
 
     def validate_process(process: behavioral.Process) -> None:
         if isinstance(process, behavioral.Sequence):
@@ -506,33 +511,6 @@ def bind_async_templates(
 
         return tuple(result)
 
-    # Preserve each exact M6 combinational RegionOperation and its original
-    # behavioral Assign expression as an explicit M7 assignment.
-    for source in architecture.combinational.operations:
-        operation = source.operation
-
-        if not isinstance(operation, behavioral.Assign):
-            raise AsyncTemplateBindingError(
-                "combinational region contains non-Assign operation"
-            )
-
-        target = _target_variable(operation.target)
-
-        if target is None:
-            raise AsyncTemplateBindingError(
-                "Assign target has no Variable identity"
-            )
-
-        assignments.append(
-            BoundAsyncAssignment(
-                target_signal_id=variable_signal(target),
-                expression=operation.value,
-                source=source,
-                kind="combinational",
-                source_signal_ids=expression_signals(operation.value),
-            )
-        )
-
     receive_stages = {
         item.input_port: item
         for item in architecture.en_receive_stages
@@ -583,6 +561,7 @@ def bind_async_templates(
         InputPort,
         tuple[str, str, str],
     ] = {}
+    receive_value_signals: list[tuple[InputPort, str]] = []
 
     for index, port in enumerate(
         architecture.input_ports
@@ -598,12 +577,7 @@ def bind_async_templates(
             )
 
         payload = _receive_payload_type(operation)
-        target = _target_variable(operation.target)
-
-        if target is None:
-            raise AsyncTemplateBindingError(
-                "Receive target has no Variable identity"
-            )
+        whole_variable_target(operation.target)
 
         req = ensure(
             f"input_{index}_body_req",
@@ -617,7 +591,13 @@ def bind_async_templates(
             behavioral.ONE_BIT,
         )
 
-        data = variable_signal(target)
+        data = ensure(
+            f"receive_value_{index}",
+            "payload",
+            payload.width,
+            operation.channel,
+        )
+        receive_value_signals.append((port, data))
 
         input_body[port] = (
             req,
@@ -1272,15 +1252,40 @@ def bind_async_templates(
             )
         if isinstance(process, behavioral.Receive):
             source, input_port = one_body_receive(process, path)
+            receive_value_matches = [
+                signal_id
+                for port, signal_id in receive_value_signals
+                if port is input_port
+            ]
+            if len(receive_value_matches) != 1:
+                raise AsyncTemplateBindingError(
+                    "missing or ambiguous receive-value signal for BODY Receive"
+                )
+            receive_value_signal_id = receive_value_matches[0]
+            declared = [
+                signal
+                for signal in signals
+                if signal.id == receive_value_signal_id
+            ]
+            payload = _receive_payload_type(process)
+            if len(declared) != 1 or declared[0].width != payload.width:
+                raise AsyncTemplateBindingError(
+                    "BODY Receive value signal has the wrong payload width"
+                )
+            target = whole_variable_target(process.target)
+            variable_signal(target)
             return BoundBodyReceiveWrite(
                 source,
                 input_port,
-                whole_variable_target(process.target),
+                target,
+                receive_value_signal_id,
             )
         if isinstance(process, behavioral.Assign):
+            target = whole_variable_target(process.target)
+            variable_signal(target)
             return BoundBodyAssignWrite(
                 one_combinational_operation(process, path),
-                whole_variable_target(process.target),
+                target,
                 process.value,
             )
         if isinstance(process, (behavioral.Send, behavioral.Skip)):
@@ -1290,6 +1295,28 @@ def bind_async_templates(
         )
 
     body_program = bind_body_process(behavioral_module.body, ())
+
+    def body_written_variables(process: BoundBodyProcess) -> tuple[behavioral.Variable, ...]:
+        if isinstance(process, (BoundBodyReceiveWrite, BoundBodyAssignWrite)):
+            return (process.target,)
+        if isinstance(process, BoundBodySequence):
+            return tuple(variable for item in process.items for variable in body_written_variables(item))
+        if isinstance(process, BoundBodyIf):
+            return body_written_variables(process.then_branch) + body_written_variables(process.else_branch)
+        if isinstance(process, BoundBodyParallel):
+            return tuple(variable for branch in process.branches for variable in body_written_variables(branch))
+        if isinstance(process, BoundBodySkip):
+            return ()
+        raise AsyncTemplateBindingError("unsupported bound BODY process")
+
+    body_target_signal_ids = {
+        variable_signal(variable)
+        for variable in body_written_variables(body_program)
+    }
+    if any(assignment.target_signal_id in body_target_signal_ids for assignment in assignments):
+        raise AsyncTemplateBindingError(
+            "structural assignment drives a BODY variable written by body_program"
+        )
 
     return BoundAsyncModule(
         architecture,

@@ -269,6 +269,14 @@ def test_conditional_receive_binds_its_explicit_m6_storage_and_delay_resources()
     assert delay.template == "bundled_data_matched_delay" and delay.source is delay_resource
     assert storage_bindings["data_in"].actual_signal_id == bindings["storage_data"].actual_signal_id
     assert storage_bindings["storage_enable"].actual_signal_id == bindings["storage_enable"].actual_signal_id
+    assert isinstance(bound.body_program, BoundBodySequence)
+    receive_if = bound.body_program.items[0]
+    assert isinstance(receive_if, BoundBodyIf)
+    assert isinstance(receive_if.then_branch, BoundBodyReceiveWrite)
+    assert storage_bindings["data_out"].actual_signal_id == receive_if.then_branch.receive_value_signal_id
+    received_signal = _variable_signal_id(bound, program.variable("a"))
+    assert storage_bindings["data_out"].actual_signal_id != received_signal
+    assert not any(item.target_signal_id == received_signal for item in bound.assignments)
     assert delay_bindings["control_in"].actual_signal_id == bindings["body_raw_req"].actual_signal_id
     assert delay_bindings["control_out"].actual_signal_id != bindings["body_raw_req"].actual_signal_id
     assert delay_bindings["control_out"].actual_signal_id == "input_0_body_req"
@@ -499,7 +507,7 @@ def test_request_fanout_and_ack_join_use_parameterized_vector_branch_controls() 
     assert {binding.formal_name for binding in _bindings_for(bound, ack_join)} >= {"reset_n", "output_ack", "base_Rack"}
 
 
-def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() -> None:
+def test_body_datapath_uses_distinct_storage_signals_and_procedural_assignments() -> None:
     program = _Program()
     expression = Expression("binary", operator="+", operands=(program.name("a"), Expression("literal", value="1'b1")))
     architecture, bound = _bind(program, Sequence((
@@ -512,8 +520,13 @@ def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() 
     storage = _bound_for(bound, slot)
     storage_bindings = {item.formal_name: item for item in _bindings_for(bound, storage)}
     assert storage_bindings["data_in"].actual_signal_id != storage_bindings["data_out"].actual_signal_id
-    assert any(assignment.source is architecture.combinational.operations[0]
-               and assignment.expression is expression for assignment in bound.assignments)
+    assert not any(assignment.source is architecture.combinational.operations[0]
+                   for assignment in bound.assignments)
+    assert isinstance(bound.body_program, BoundBodySequence)
+    assign_write = bound.body_program.items[1]
+    assert isinstance(assign_write, BoundBodyAssignWrite)
+    assert assign_write.source is architecture.combinational.operations[0]
+    assert assign_write.expression is expression
     body_send = architecture.output_ports[0].body_send
     assert any(assignment.source is body_send and assignment.expression is body_send.source.operation.value
                and assignment.target_signal_id == storage_bindings["data_in"].actual_signal_id
@@ -526,7 +539,7 @@ def test_body_datapath_uses_distinct_storage_signals_and_explicit_assignments() 
                for assignment in bound.assignments)
 
 
-def test_receive_target_has_one_exact_variable_binding_driven_by_body_receive_data() -> None:
+def test_receive_target_has_one_exact_variable_binding_written_from_a_dedicated_receive_value() -> None:
     program = _Program()
     received = program.variable("a", _BYTE)
     architecture, bound = _bind(program, Sequence((
@@ -544,10 +557,38 @@ def test_receive_target_has_one_exact_variable_binding_driven_by_body_receive_da
                            if assignment.source is architecture.output_ports[0].body_send)
 
     assert signal.width == received.payload_type.width
-    assert any(assignment.target_signal_id == signal_id and
+    assert isinstance(bound.body_program, BoundBodySequence)
+    receive_write = bound.body_program.items[0]
+    assert isinstance(receive_write, BoundBodyReceiveWrite)
+    assert receive_write.input_port is input_port
+    assert receive_write.target is received
+    assert receive_write.receive_value_signal_id != signal_id
+    assert any(assignment.target_signal_id == receive_write.receive_value_signal_id and
                assignment.source_signal_ids == (receive_payload,)
                for assignment in bound.assignments)
+    assert not any(assignment.target_signal_id == signal_id for assignment in bound.assignments)
     assert signal_id in send_assignment.source_signal_ids
+
+
+def test_every_input_port_owns_one_distinct_dedicated_receive_value_signal() -> None:
+    program = _Program()
+    architecture, bound = _bind(program, Sequence((
+        program.receive("A", "a", _BYTE),
+        program.receive("B", "b", _BYTE),
+        program.send("C", program.name("a", _BYTE), _BYTE),
+        program.send("D", program.name("b", _BYTE), _BYTE),
+    )))
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    writes = [item for item in bound.body_program.items if isinstance(item, BoundBodyReceiveWrite)]
+    assert len(writes) == len(architecture.input_ports) == 2
+    assert all(sum(item.input_port is port for item in writes) == 1 for port in architecture.input_ports)
+    assert len({item.receive_value_signal_id for item in writes}) == 2
+    for write in writes:
+        signal = next(item for item in bound.signals if item.id == write.receive_value_signal_id)
+        assert signal.width == write.target.payload_type.width
+        assert not any(item.target_signal_id == _variable_signal_id(bound, write.target)
+                       for item in bound.assignments)
 
 
 def test_assignment_targets_and_rhs_use_distinct_exact_variable_bindings() -> None:
@@ -566,17 +607,23 @@ def test_assignment_targets_and_rhs_use_distinct_exact_variable_bindings() -> No
 
     received_signal = _variable_signal_id(bound, received)
     assigned_signal = _variable_signal_id(bound, assigned)
-    receive_payload = next(port.signal_id for port in bound.module_ports
-                           if port.flow == "receive")
-    combinational = next(item for item in bound.assignments if item.source is architecture.combinational.operations[0])
+    receive_payload = next(port.signal_id for port in bound.module_ports if port.flow == "receive")
     send_assignment = next(assignment for assignment in bound.assignments
                            if assignment.source is architecture.output_ports[0].body_send)
 
     assert received_signal != assigned_signal
-    assert any(item.target_signal_id == received_signal and item.source_signal_ids == (receive_payload,)
+    assert isinstance(bound.body_program, BoundBodySequence)
+    receive_write, assign_write, _ = bound.body_program.items
+    assert isinstance(receive_write, BoundBodyReceiveWrite)
+    assert isinstance(assign_write, BoundBodyAssignWrite)
+    assert any(item.target_signal_id == receive_write.receive_value_signal_id
+               and item.source_signal_ids == (receive_payload,)
                for item in bound.assignments)
-    assert combinational.target_signal_id == assigned_signal
-    assert received_signal in combinational.source_signal_ids
+    assert receive_write.target is received
+    assert assign_write.target is assigned
+    assert assign_write.expression is expression
+    assert not any(item.target_signal_id in {received_signal, assigned_signal}
+                   for item in bound.assignments)
     assert assigned_signal in send_assignment.source_signal_ids
 
 
@@ -1062,22 +1109,68 @@ def test_body_program_rejects_malformed_selected_lvalue_targets(kind: str) -> No
         bind_async_templates(malformed_architecture)
 
 
-def test_body_program_is_additive_to_existing_structural_assignments() -> None:
+@pytest.mark.parametrize("kind", ("receive", "assign"))
+def test_body_program_rejects_malformed_external_input_write_targets(kind: str) -> None:
+    program = _Program()
+    program.external_name("sel")
+    if kind == "receive":
+        body = Sequence((program.receive("A", "x"), program.send("B", program.name("x"))))
+    else:
+        body = Sequence((
+            program.receive("A", "a"),
+            Assign(program.variable("x"), program.name("a")),
+            program.send("B", program.name("x")),
+        ))
+    architecture = _architecture(program, body)
+    external = program.external_inputs["sel"]
+    if kind == "receive":
+        malformed_body = Sequence((
+            Receive(ChannelEndpoint("A", payload_type=_ONE_BIT), external),
+            program.send("B", program.name("x")),
+        ))
+    else:
+        malformed_body = Sequence((
+            program.receive("A", "a"),
+            Assign(external, program.name("a")),
+            program.send("B", program.name("x")),
+        ))
+    from dataclasses import replace
+    malformed_transaction = replace(
+        architecture.validated.decomposed.transaction,
+        behavioral=replace(
+            architecture.validated.decomposed.transaction.behavioral,
+            body=malformed_body,
+        ),
+    )
+    malformed_decomposed = replace(
+        architecture.validated.decomposed,
+        transaction=malformed_transaction,
+    )
+    malformed_architecture = replace(
+        architecture,
+        validated=replace(architecture.validated, decomposed=malformed_decomposed),
+    )
+
+    with pytest.raises(AsyncTemplateBindingError, match="exact local Variable"):
+        bind_async_templates(malformed_architecture)
+
+
+def test_body_program_replaces_user_assignments_but_preserves_structural_wiring() -> None:
     program = _Program()
     assign = Assign(program.variable("y"), program.name("a"))
     architecture, bound = _bind(program, Sequence((
         program.receive("A", "a"), assign, program.send("B", program.name("y")),
     )))
 
-    assert any(
-        item.source is architecture.combinational.operations[0]
-        and item.expression is assign.value
-        for item in bound.assignments
-    )
+    assert not any(item.source is architecture.combinational.operations[0] for item in bound.assignments)
+    assert isinstance(bound.body_program, BoundBodySequence)
+    assert isinstance(bound.body_program.items[1], BoundBodyAssignWrite)
+    assert bound.body_program.items[1].expression is assign.value
     received = program.variable("a")
     received_signal = _variable_signal_id(bound, received)
     assert any(
-        item.target_signal_id == received_signal
+        item.target_signal_id == bound.body_program.items[0].receive_value_signal_id
         and item.source_signal_ids
         for item in bound.assignments
     )
+    assert not any(item.target_signal_id == received_signal for item in bound.assignments)

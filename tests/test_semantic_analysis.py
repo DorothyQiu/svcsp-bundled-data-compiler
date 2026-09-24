@@ -1,6 +1,8 @@
 """M5 semantic dependency and conditional-validity contract tests."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from svcsp_compiler.behavioral_ir import (
@@ -370,6 +372,51 @@ def test_pre_input_guard_expression_with_multiple_external_inputs_is_accepted() 
     ))
 
     _analyze(program, body)
+
+
+def test_source_receive_into_external_input_is_rejected() -> None:
+    behavioral = lower_behavioral(parse_text('''module m(input logic sel, Channel #(1) A, B);
+logic x;
+always begin A.Receive(x); B.Send(1'b0); end
+endmodule'''))
+    receive, send = behavioral.body.items
+    malformed = replace(
+        behavioral,
+        body=Sequence((replace(receive, target=behavioral.external_inputs[0]), send)),
+    )
+    with pytest.raises(SemanticValidationError, match="exact local Variable"):
+        analyze_semantics(decompose_transaction(extract_transaction(malformed)))
+
+
+def test_source_assign_to_external_input_is_rejected() -> None:
+    behavioral = lower_behavioral(parse_text('''module m(input logic sel, Channel #(1) A, B);
+logic a, x;
+always begin A.Receive(a); x = a; B.Send(x); end
+endmodule'''))
+    receive, assign, send = behavioral.body.items
+    malformed = replace(
+        behavioral,
+        body=Sequence((receive, replace(assign, target=behavioral.external_inputs[0]), send)),
+    )
+    with pytest.raises(SemanticValidationError, match="exact local Variable"):
+        analyze_semantics(decompose_transaction(extract_transaction(malformed)))
+
+
+def test_external_input_remains_legal_as_assign_rhs_and_send_value() -> None:
+    program = _Program()
+    select = program.condition("sel")
+    rhs_body = Sequence((
+        program.receive("A", "a"),
+        program.assign("y", select),
+        program.send("B", program.name("y")),
+    ))
+    send_body = Sequence((
+        program.receive("A", "a"),
+        program.send("B", select),
+    ))
+
+    _analyze(program, rhs_body)
+    _analyze(program, send_body)
 
 
 def test_undefined_local_pre_input_guard_is_rejected() -> None:
