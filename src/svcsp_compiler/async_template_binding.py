@@ -127,21 +127,33 @@ class BoundAsyncVariableBinding:
 
 
 @dataclass(frozen=True)
+class BoundBodyLValue:
+    """One exact supported BODY lvalue, including any static selection."""
+
+    source: behavioral.Variable | behavioral.Expression
+    variable: behavioral.Variable
+    selector_form: str | None = None
+    selector_values: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class BoundBodyReceiveWrite:
-    """One exact BODY Receive occurrence and its whole-Variable write."""
+    """One exact BODY Receive occurrence and its supported lvalue write."""
 
     source: BodyReceive
     input_port: InputPort
     target: behavioral.Variable
+    lvalue: BoundBodyLValue
     receive_value_signal_id: str
 
 
 @dataclass(frozen=True)
 class BoundBodyAssignWrite:
-    """One exact source Assign occurrence and its whole-Variable write."""
+    """One exact source Assign occurrence and its supported lvalue write."""
 
     source: RegionOperation
     target: behavioral.Variable
+    lvalue: BoundBodyLValue
     expression: behavioral.Expression
 
 
@@ -262,18 +274,52 @@ def bind_async_templates(
         for operand in expression.operands:
             validate_expression(operand)
 
-    def whole_variable_target(
+    def body_lvalue(
         target: behavioral.Variable | behavioral.Expression,
-    ) -> behavioral.Variable:
-        if not isinstance(target, behavioral.Variable):
+    ) -> BoundBodyLValue:
+        if isinstance(target, behavioral.Variable):
+            if not any(target is local for local in behavioral_module.variables):
+                raise AsyncTemplateBindingError(
+                    "R9A BODY write target must be an exact local Variable"
+                )
+            return BoundBodyLValue(target, target)
+        if target.form != "select" or target.variable is None:
             raise AsyncTemplateBindingError(
-                "R9A does not support selected lvalue targets"
+                "R9B BODY lvalue target must be a local Variable or static selection"
             )
-        if not any(target is local for local in behavioral_module.variables):
+        variable = target.variable
+        if not any(variable is local for local in behavioral_module.variables):
             raise AsyncTemplateBindingError(
                 "R9A BODY write target must be an exact local Variable"
             )
-        return target
+        width = variable.payload_type.width.bits
+        if width is None:
+            raise AsyncTemplateBindingError(
+                "R9B does not support selected lvalues on symbolic-width Variables"
+            )
+        if len(target.operands) != 1:
+            raise AsyncTemplateBindingError(
+                "R9B lvalue selector must be one static literal index or range"
+            )
+        selector = target.operands[0]
+        if selector.form == "index" and len(selector.operands) == 1:
+            index = _literal_integer(selector.operands[0])
+            if index is None:
+                raise AsyncTemplateBindingError("R9B lvalue index must be a literal integer")
+            values = (index,)
+        elif selector.form == "range" and len(selector.operands) == 2:
+            left = _literal_integer(selector.operands[0])
+            right = _literal_integer(selector.operands[1])
+            if left is None or right is None:
+                raise AsyncTemplateBindingError("R9B lvalue range endpoints must be literal integers")
+            values = (left, right)
+        else:
+            raise AsyncTemplateBindingError(
+                "R9B lvalue selector must be one static literal index or range"
+            )
+        if min(values) < 0 or max(values) >= width:
+            raise AsyncTemplateBindingError("R9B lvalue selection is out of bounds")
+        return BoundBodyLValue(target, variable, selector.form, values)
 
     def validate_process(process: behavioral.Process) -> None:
         if isinstance(process, behavioral.Sequence):
@@ -292,13 +338,13 @@ def bind_async_templates(
         if isinstance(process, behavioral.Assign):
             if isinstance(process.target, behavioral.Expression):
                 validate_expression(process.target)
-            whole_variable_target(process.target)
+            body_lvalue(process.target)
             validate_expression(process.value)
             return
         if isinstance(process, behavioral.Receive):
             if isinstance(process.target, behavioral.Expression):
                 validate_expression(process.target)
-            whole_variable_target(process.target)
+            body_lvalue(process.target)
             for selector in process.channel.selectors:
                 validate_expression(selector)
             return
@@ -577,7 +623,7 @@ def bind_async_templates(
             )
 
         payload = _receive_payload_type(operation)
-        whole_variable_target(operation.target)
+        body_lvalue(operation.target)
 
         req = ensure(
             f"input_{index}_body_req",
@@ -1267,25 +1313,30 @@ def bind_async_templates(
                 for signal in signals
                 if signal.id == receive_value_signal_id
             ]
+            lvalue = body_lvalue(process.target)
             payload = _receive_payload_type(process)
-            if len(declared) != 1 or declared[0].width != payload.width:
+            if (len(declared) != 1 or declared[0].width != payload.width
+                    or payload.width != _body_lvalue_width(lvalue)):
                 raise AsyncTemplateBindingError(
                     "BODY Receive value signal has the wrong payload width"
                 )
-            target = whole_variable_target(process.target)
+            target = lvalue.variable
             variable_signal(target)
             return BoundBodyReceiveWrite(
                 source,
                 input_port,
                 target,
+                lvalue,
                 receive_value_signal_id,
             )
         if isinstance(process, behavioral.Assign):
-            target = whole_variable_target(process.target)
+            lvalue = body_lvalue(process.target)
+            target = lvalue.variable
             variable_signal(target)
             return BoundBodyAssignWrite(
                 one_combinational_operation(process, path),
                 target,
+                lvalue,
                 process.value,
             )
         if isinstance(process, (behavioral.Send, behavioral.Skip)):
@@ -1854,6 +1905,32 @@ def _target_variable(
         )
         else target.variable
     )
+
+
+def _literal_integer(expression: behavioral.Expression) -> int | None:
+    if expression.form != "literal" or expression.value is None:
+        return None
+    text = expression.value.replace("_", "")
+    try:
+        if "'" in text:
+            _, value = text.split("'", 1)
+            if not value or value[0].lower() not in {"d", "h", "o", "b"}:
+                return None
+            base = {"d": 10, "h": 16, "o": 8, "b": 2}[value[0].lower()]
+            return int(value[1:], base)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
+def _body_lvalue_width(lvalue: BoundBodyLValue) -> behavioral.PayloadWidth:
+    if lvalue.selector_form is None:
+        return lvalue.variable.payload_type.width
+    if lvalue.selector_form == "index" and len(lvalue.selector_values) == 1:
+        return behavioral.ONE_BIT
+    if lvalue.selector_form == "range" and len(lvalue.selector_values) == 2:
+        return behavioral.PayloadWidth(bits=abs(lvalue.selector_values[0] - lvalue.selector_values[1]) + 1)
+    raise AsyncTemplateBindingError("malformed R9B bound BODY lvalue")
 
 
 def _receive_payload_type(

@@ -8,6 +8,7 @@ from svcsp_compiler.async_template_binding import (
     AsyncTemplateBindingError,
     BoundBodyAssignWrite,
     BoundBodyIf,
+    BoundBodyLValue,
     BoundBodyParallel,
     BoundBodyReceiveWrite,
     BoundBodySequence,
@@ -41,6 +42,7 @@ from svcsp_compiler.transaction import extract_transaction
 
 
 _ONE_BIT = PayloadType("logic", ONE_BIT)
+_NIBBLE = PayloadType("logic", width=PayloadWidth(bits=4))
 _BYTE = PayloadType("logic", width=PayloadWidth(bits=8))
 
 
@@ -117,6 +119,14 @@ def _variable_signal_id(bound: BoundAsyncModule, variable: Variable) -> str:
     bindings = [item for item in bound.variable_bindings if item.variable is variable]
     assert len(bindings) == 1
     return bindings[0].signal_id
+
+
+def _static_lvalue(variable: Variable, *values: int) -> Expression:
+    selector = Expression(
+        "index" if len(values) == 1 else "range",
+        operands=tuple(Expression("literal", value=str(value)) for value in values),
+    )
+    return Expression("select", variable=variable, operands=(selector,))
 
 
 def _assert_complete_typed_bindings(bound: BoundAsyncModule) -> None:
@@ -1055,8 +1065,57 @@ def test_body_program_preserves_conditional_receive_and_parallel_branches() -> N
     assert parallel.branches[1].source.operation is second
 
 
+@pytest.mark.parametrize(("values", "payload"), (((0,), _ONE_BIT), ((3, 0), _NIBBLE)))
+def test_body_receive_write_preserves_exact_static_selected_lvalue(
+    values: tuple[int, ...], payload: PayloadType,
+) -> None:
+    program = _Program()
+    base = program.variable("x", _BYTE)
+    target = _static_lvalue(base, *values)
+    receive = Receive(ChannelEndpoint("A", payload_type=payload), target)
+    body = Sequence((receive, program.send("B", target, payload)))
+    architecture, bound = _bind(program, body)
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    write = bound.body_program.items[0]
+    assert isinstance(write, BoundBodyReceiveWrite)
+    assert isinstance(write.lvalue, BoundBodyLValue)
+    assert write.target is base and write.lvalue.variable is base
+    assert write.lvalue.source is target
+    assert write.lvalue.selector_form == ("index" if len(values) == 1 else "range")
+    assert write.lvalue.selector_values == values
+    signal = next(item for item in bound.signals if item.id == write.receive_value_signal_id)
+    assert signal.width == payload.width
+    assert write.input_port is architecture.input_ports[0]
+
+
+@pytest.mark.parametrize(("values", "payload"), (((0,), _ONE_BIT), ((3, 0), _NIBBLE)))
+def test_body_assign_write_preserves_exact_static_selected_lvalue(
+    values: tuple[int, ...], payload: PayloadType,
+) -> None:
+    program = _Program()
+    base = program.variable("x", _BYTE)
+    target = _static_lvalue(base, *values)
+    value = program.external_name("value", payload)
+    assign = Assign(target, value)
+    body = Sequence((
+        program.receive("A", "a"),
+        assign,
+        program.send("B", target, payload),
+    ))
+    _, bound = _bind(program, body)
+
+    assert isinstance(bound.body_program, BoundBodySequence)
+    write = bound.body_program.items[1]
+    assert isinstance(write, BoundBodyAssignWrite)
+    assert write.target is base and write.lvalue.variable is base
+    assert write.lvalue.source is target
+    assert write.lvalue.selector_values == values
+    assert write.expression is value
+
+
 @pytest.mark.parametrize("kind", ("receive", "assign"))
-def test_body_program_rejects_malformed_selected_lvalue_targets(kind: str) -> None:
+def test_body_program_rejects_malformed_dynamic_selected_lvalue_targets(kind: str) -> None:
     program = _Program()
     if kind == "receive":
         body = Sequence((program.receive("A", "x"), program.send("B", program.name("x"))))
@@ -1073,7 +1132,7 @@ def test_body_program_rejects_malformed_selected_lvalue_targets(kind: str) -> No
         operands=(
             Expression(
                 "index",
-                operands=(Expression("literal", value="0"),),
+                operands=(program.name("x"),),
             ),
         ),
     )
@@ -1105,7 +1164,7 @@ def test_body_program_rejects_malformed_selected_lvalue_targets(kind: str) -> No
         validated=replace(architecture.validated, decomposed=malformed_decomposed),
     )
 
-    with pytest.raises(AsyncTemplateBindingError, match="R9A does not support selected lvalue targets"):
+    with pytest.raises(AsyncTemplateBindingError, match="literal integer"):
         bind_async_templates(malformed_architecture)
 
 

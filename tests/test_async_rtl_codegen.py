@@ -9,7 +9,12 @@ import pytest
 
 from svcsp_compiler.async_microarchitecture import lower_microarchitecture
 from svcsp_compiler.async_rtl_codegen import AsyncRTLCodegenError, emit_async_systemverilog
-from svcsp_compiler.async_template_binding import bind_async_templates
+from svcsp_compiler.async_template_binding import (
+    BoundBodyLValue,
+    BoundBodyReceiveWrite,
+    BoundBodySequence,
+    bind_async_templates,
+)
 from svcsp_compiler.behavioral_ir import (
     Assign,
     BehavioralModule,
@@ -36,6 +41,7 @@ from svcsp_compiler.transaction import extract_transaction
 
 
 _BIT = PayloadType("logic", ONE_BIT)
+_NIBBLE = PayloadType("logic", PayloadWidth(bits=4))
 _BYTE = PayloadType("logic", PayloadWidth(bits=8))
 
 
@@ -134,6 +140,17 @@ def _variable_signal_id(
     ]
     assert len(bindings) == 1
     return bindings[0].signal_id
+
+
+def _static_lvalue(variable: Variable, *values: int) -> Expression:
+    return Expression(
+        "select",
+        variable=variable,
+        operands=(Expression(
+            "index" if len(values) == 1 else "range",
+            operands=tuple(Expression("literal", value=str(value)) for value in values),
+        ),),
+    )
 
 
 def test_external_input_is_rendered_as_a_public_port_not_a_body_variable() -> None:
@@ -742,6 +759,100 @@ def test_body_renderer_deterministically_linearizes_noninterfering_parallel_writ
 
     assert "\n    fork\n" not in rtl and "\n    join\n" not in rtl
     assert rtl.index(f"{y_signal} = {a_signal};") < rtl.index(f"{z_signal} = {b_signal};")
+
+
+@pytest.mark.parametrize(("values", "payload", "rendered"), (
+    ((0,), _BIT, "[0]"),
+    ((3, 0), _NIBBLE, "[3:0]"),
+))
+def test_body_renderer_preserves_selected_receive_lvalues(
+    values: tuple[int, ...], payload: PayloadType, rendered: str,
+) -> None:
+    program = _Program()
+    base = program.variable("x", _BYTE)
+    target = _static_lvalue(base, *values)
+    receive = Receive(ChannelEndpoint("A", payload_type=payload), target)
+    bound = _bound(program, Sequence((receive, program.send("B", target, payload))))
+    rtl = emit_async_systemverilog(bound)
+    base_signal = _variable_signal_id(bound, base)
+
+    assert f"{base_signal} = 'x;" in rtl
+    assert f"{base_signal}{rendered} = receive_value_0;" in rtl
+    assert f"{base_signal} = receive_value_0;" not in rtl
+
+
+@pytest.mark.parametrize(("values", "payload", "rendered"), (
+    ((0,), _BIT, "[0]"),
+    ((3, 0), _NIBBLE, "[3:0]"),
+))
+def test_body_renderer_preserves_selected_assign_lvalues(
+    values: tuple[int, ...], payload: PayloadType, rendered: str,
+) -> None:
+    program = _Program()
+    base = program.variable("x", _BYTE)
+    target = _static_lvalue(base, *values)
+    value = program.external_name("value", payload)
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        Assign(target, value),
+        program.send("B", target, payload),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    base_signal = _variable_signal_id(bound, base)
+
+    assert f"{base_signal} = 'x;" in rtl
+    assert f"{base_signal}{rendered} = value;" in rtl
+    assert f"{base_signal} = value;" not in rtl
+
+
+def test_body_renderer_defaults_one_base_once_and_preserves_selected_write_order() -> None:
+    program = _Program()
+    base = program.variable("x", _BYTE)
+    bit_zero = _static_lvalue(base, 0)
+    bit_one = _static_lvalue(base, 1)
+    bound = _bound(program, Sequence((
+        program.receive("A", "a"),
+        program.receive("B", "b"),
+        Assign(bit_zero, program.name("a")),
+        Assign(bit_one, program.name("b")),
+        Assign(bit_zero, program.name("b")),
+        program.send("C", bit_zero),
+        program.send("D", bit_one),
+    )))
+    rtl = emit_async_systemverilog(bound)
+    base_signal = _variable_signal_id(bound, base)
+    a_signal = _variable_signal_id(bound, program.variable("a"))
+    b_signal = _variable_signal_id(bound, program.variable("b"))
+
+    assert rtl.count(f"{base_signal} = 'x;") == 1
+    first = rtl.index(f"{base_signal}[0] = {a_signal};")
+    second = rtl.index(f"{base_signal}[1] = {b_signal};")
+    overlap = rtl.index(f"{base_signal}[0] = {b_signal};")
+    assert first < second < overlap
+    assert f"assign {base_signal} = " not in rtl
+
+
+def test_codegen_rejects_malformed_selected_body_lvalue() -> None:
+    program = _Program()
+    base = program.variable("x", _BYTE)
+    target = _static_lvalue(base, 0)
+    receive = Receive(ChannelEndpoint("A", payload_type=_BIT), target)
+    bound = _bound(program, Sequence((receive, program.send("B", target))))
+    assert isinstance(bound.body_program, BoundBodySequence)
+    write = bound.body_program.items[0]
+    assert isinstance(write, BoundBodyReceiveWrite)
+    malformed_source = _static_lvalue(base, 8)
+    malformed_write = replace(
+        write,
+        lvalue=BoundBodyLValue(malformed_source, base, "index", (8,)),
+    )
+    malformed = replace(
+        bound,
+        body_program=BoundBodySequence((malformed_write, *bound.body_program.items[1:])),
+    )
+
+    with pytest.raises(AsyncRTLCodegenError, match="out of bounds"):
+        emit_async_systemverilog(malformed)
 
 
 def test_expression_rendering_uses_only_m7a_bound_variable_signals() -> None:

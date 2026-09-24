@@ -6,6 +6,7 @@ from .async_template_binding import (
     BoundAsyncModule,
     BoundBodyAssignWrite,
     BoundBodyIf,
+    BoundBodyLValue,
     BoundBodyParallel,
     BoundBodyProcess,
     BoundBodyReceiveWrite,
@@ -157,9 +158,11 @@ def _validate_body_program(bound: BoundAsyncModule, signal_ids: set[str]) -> Non
     written: dict[int, behavioral.Variable] = {}
     receives: list[BoundBodyReceiveWrite] = []
 
-    def target_signal(variable: behavioral.Variable) -> str:
+    def target_signal(lvalue: BoundBodyLValue) -> str:
+        variable = lvalue.variable
         if not isinstance(variable, behavioral.Variable):
             raise AsyncRTLCodegenError("R9A BODY program has a selected lvalue target")
+        _render_body_lvalue(lvalue, bound)
         signal_id = _variable_signal(variable, bound)
         if signal_id not in signal_ids:
             raise AsyncRTLCodegenError("BODY target Variable has an undeclared binding")
@@ -168,7 +171,9 @@ def _validate_body_program(bound: BoundAsyncModule, signal_ids: set[str]) -> Non
 
     def visit(process: BoundBodyProcess) -> None:
         if isinstance(process, BoundBodyReceiveWrite):
-            target_signal(process.target)
+            if process.lvalue.variable is not process.target:
+                raise AsyncRTLCodegenError("BODY ReceiveWrite lvalue differs from its target Variable")
+            target_signal(process.lvalue)
             if process.input_port.body_receive is not process.source:
                 raise AsyncRTLCodegenError("BODY ReceiveWrite has mismatched InputPort identity")
             if process.receive_value_signal_id not in signal_ids:
@@ -176,19 +181,21 @@ def _validate_body_program(bound: BoundAsyncModule, signal_ids: set[str]) -> Non
             operation = process.source.source.operation
             if not isinstance(operation, behavioral.Receive):
                 raise AsyncRTLCodegenError("BODY ReceiveWrite source is not a Receive")
-            if operation.target is not process.target:
+            if operation.target is not process.lvalue.source:
                 raise AsyncRTLCodegenError("BODY ReceiveWrite target differs from its source Receive")
             payload = operation.channel.payload_type or process.target.payload_type
             signal = next(signal for signal in bound.signals if signal.id == process.receive_value_signal_id)
-            if signal.width != payload.width:
+            if signal.width != payload.width or payload.width != _body_lvalue_width(process.lvalue):
                 raise AsyncRTLCodegenError("BODY ReceiveWrite receive-value signal has the wrong width")
             receives.append(process)
             return
         if isinstance(process, BoundBodyAssignWrite):
-            target_signal(process.target)
+            if process.lvalue.variable is not process.target:
+                raise AsyncRTLCodegenError("BODY AssignWrite lvalue differs from its target Variable")
+            target_signal(process.lvalue)
             if not isinstance(process.source.operation, behavioral.Assign):
                 raise AsyncRTLCodegenError("BODY AssignWrite source is not an Assign")
-            if process.source.operation.target is not process.target:
+            if process.source.operation.target is not process.lvalue.source:
                 raise AsyncRTLCodegenError("BODY AssignWrite target differs from its source Assign")
             if process.source.operation.value is not process.expression:
                 raise AsyncRTLCodegenError("BODY AssignWrite expression differs from its source Assign")
@@ -218,7 +225,10 @@ def _validate_body_program(bound: BoundAsyncModule, signal_ids: set[str]) -> Non
     receive_signal_ids = [item.receive_value_signal_id for item in receives]
     if len(receive_signal_ids) != len(set(receive_signal_ids)):
         raise AsyncRTLCodegenError("receive-value signal is shared by multiple InputPorts")
-    written_signal_ids = {target_signal(variable) for variable in written.values()}
+    written_signal_ids = {
+        target_signal(BoundBodyLValue(variable, variable))
+        for variable in written.values()
+    }
     if any(item.target_signal_id in written_signal_ids for item in bound.assignments):
         raise AsyncRTLCodegenError(
             "structural assignment drives a BODY variable written by body_program"
@@ -257,12 +267,12 @@ def _emit_body_program(
     def emit(process: BoundBodyProcess, indent: str) -> None:
         if isinstance(process, BoundBodyReceiveWrite):
             lines.append(
-                f"{indent}{_variable_signal(process.target, bound)} = {process.receive_value_signal_id};"
+                f"{indent}{_render_body_lvalue(process.lvalue, bound)} = {process.receive_value_signal_id};"
             )
             return
         if isinstance(process, BoundBodyAssignWrite):
             lines.append(
-                f"{indent}{_variable_signal(process.target, bound)} = {_expression(process.expression, bound)};"
+                f"{indent}{_render_body_lvalue(process.lvalue, bound)} = {_expression(process.expression, bound)};"
             )
             return
         if isinstance(process, BoundBodySequence):
@@ -383,6 +393,69 @@ def _concatenate(values: list[str]) -> str:
     if len(values) == 1:
         return values[0]
     return "{" + ", ".join(reversed(values)) + "}"
+
+
+def _literal_integer(expression: behavioral.Expression) -> int | None:
+    if expression.form != "literal" or expression.value is None:
+        return None
+    text = expression.value.replace("_", "")
+    try:
+        if "'" in text:
+            _, value = text.split("'", 1)
+            if not value or value[0].lower() not in {"d", "h", "o", "b"}:
+                return None
+            base = {"d": 10, "h": 16, "o": 8, "b": 2}[value[0].lower()]
+            return int(value[1:], base)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
+def _body_lvalue_width(lvalue: BoundBodyLValue) -> behavioral.PayloadWidth:
+    if lvalue.selector_form is None:
+        return lvalue.variable.payload_type.width
+    if lvalue.selector_form == "index" and len(lvalue.selector_values) == 1:
+        return behavioral.ONE_BIT
+    if lvalue.selector_form == "range" and len(lvalue.selector_values) == 2:
+        return behavioral.PayloadWidth(bits=abs(lvalue.selector_values[0] - lvalue.selector_values[1]) + 1)
+    raise AsyncRTLCodegenError("malformed R9B bound BODY lvalue")
+
+
+def _render_body_lvalue(lvalue: BoundBodyLValue, bound: BoundAsyncModule) -> str:
+    variable = lvalue.variable
+    base = _variable_signal(variable, bound)
+    source = lvalue.source
+    if lvalue.selector_form is None:
+        if source is not variable:
+            raise AsyncRTLCodegenError("whole BODY lvalue source differs from its base Variable")
+        return base
+    if not isinstance(source, behavioral.Expression) or source.form != "select" or source.variable is not variable:
+        raise AsyncRTLCodegenError("selected BODY lvalue source is malformed")
+    if variable.payload_type.width.bits is None:
+        raise AsyncRTLCodegenError("R9B selected BODY lvalue has symbolic-width base Variable")
+    if len(source.operands) != 1:
+        raise AsyncRTLCodegenError("selected BODY lvalue has unsupported selector count")
+    selector = source.operands[0]
+    if lvalue.selector_form == "index":
+        if len(lvalue.selector_values) != 1 or selector.form != "index" or len(selector.operands) != 1:
+            raise AsyncRTLCodegenError("selected BODY lvalue index is malformed")
+        value = _literal_integer(selector.operands[0])
+        if value != lvalue.selector_values[0]:
+            raise AsyncRTLCodegenError("selected BODY lvalue index differs from its source")
+        if value < 0 or value >= variable.payload_type.width.bits:
+            raise AsyncRTLCodegenError("selected BODY lvalue index is out of bounds")
+        return f"{base}[{value}]"
+    if lvalue.selector_form == "range":
+        if len(lvalue.selector_values) != 2 or selector.form != "range" or len(selector.operands) != 2:
+            raise AsyncRTLCodegenError("selected BODY lvalue range is malformed")
+        left = _literal_integer(selector.operands[0])
+        right = _literal_integer(selector.operands[1])
+        if (left, right) != lvalue.selector_values:
+            raise AsyncRTLCodegenError("selected BODY lvalue range differs from its source")
+        if left is None or right is None or min(left, right) < 0 or max(left, right) >= variable.payload_type.width.bits:
+            raise AsyncRTLCodegenError("selected BODY lvalue range is out of bounds")
+        return f"{base}[{left}:{right}]"
+    raise AsyncRTLCodegenError("selected BODY lvalue has unsupported selector form")
 
 
 def _expression(expression: behavioral.Expression, bound: BoundAsyncModule) -> str:
