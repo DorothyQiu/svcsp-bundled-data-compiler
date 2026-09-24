@@ -140,6 +140,39 @@ endmodule''')
         compile_async_file(source)
 
 
+@pytest.mark.parametrize(('source_text', 'match'), (
+    ('''module partial_selected_read(Channel #(1) A, Channel #(8) B); logic [7:0] x; always begin
+A.Receive(x[0]); B.Send(x); end endmodule''',
+     'conditional receive data x is not valid'),
+    ('''module dynamic_selected_target(Channel #(1) A, B); logic [7:0] x; logic [2:0] i; always begin
+A.Receive(x[i]); B.Send(1'b0); end endmodule''',
+     'literal integer'),
+    ('''module parameter_selected_target #(parameter int P = 0) (Channel #(1) A, B); logic [7:0] x; always begin
+A.Receive(x[P]); B.Send(1'b0); end endmodule''',
+     'literal integer'),
+    ('''module symbolic_selected_target #(parameter int W = 8) (Channel #(1) A, B); logic [W-1:0] x; always begin
+A.Receive(x[0]); B.Send(1'b0); end endmodule''',
+     'symbolic-width'),
+    ('''module out_of_bounds_selected_target(Channel #(1) A, B); logic [7:0] x; always begin
+A.Receive(x[8]); B.Send(1'b0); end endmodule''',
+     'out of bounds'),
+    ('''module parallel_selected_overlap(Channel #(4) A, Channel #(2) B, Channel #(1) C); logic [3:0] a; logic [1:0] b; logic [3:0] x; always begin
+A.Receive(a); B.Receive(b); fork x[3:0] = a; x[2:1] = b; join C.Send(a[0]); end endmodule''',
+     'Parallel combinational branches conflict'),
+    ('''module concurrent_selected_receives(Channel #(4) A, Channel #(2) B, Channel #(4) C); logic [7:0] x; always begin
+A.Receive(x[3:0]); B.Receive(x[2:1]); C.Send(x[3:0]); end endmodule''',
+     'concurrent Receive targets overlap'),
+))
+def test_target_entrypoint_rejects_unsupported_or_incomplete_selected_lvalues(
+    tmp_path: Path, source_text: str, match: str,
+) -> None:
+    source = tmp_path / 'r9b_invalid_selected_lvalue.sv'
+    source.write_text(source_text)
+
+    with pytest.raises(SemanticValidationError, match=match):
+        compile_async_file(source)
+
+
 @pytest.mark.parametrize(('source_text', 'error', 'match'), (
     ('''module same_receive(Channel #(1) A, B, C); logic x; always begin
 A.Receive(x); B.Receive(x); C.Send(x); end endmodule''',

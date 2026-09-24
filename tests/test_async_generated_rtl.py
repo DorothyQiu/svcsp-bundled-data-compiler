@@ -934,6 +934,189 @@ endmodule
 ''')
 
 
+@pytest.mark.parametrize(("name", "body", "expected", "write"), (
+    (
+        "r9b_source_bit_receive_assign",
+        "A.Receive(x[0]); x[1] = x[0]; B.Send(x[1]);",
+        "1'b1",
+        "body_var_0_x[1] = body_var_0_x[0];",
+    ),
+    (
+        "r9b_source_range_receive_assign",
+        "A.Receive(x[3:0]); x[7:4] = x[3:0]; B.Send(x[7:4]);",
+        "4'ha",
+        "body_var_0_x[7:4] = body_var_0_x[3:0];",
+    ),
+))
+def test_source_file_selected_receive_and_assign_simulate(
+    tmp_path: Path, name: str, body: str, expected: str, write: str,
+) -> None:
+    width = "1" if "bit_" in name else "4"
+    payload = "1'b1" if width == "1" else "4'ha"
+    base = "logic [1:0] x;" if width == "1" else "logic [7:0] x;"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(Channel #({width}) A, B);
+{base}
+always begin {body} end
+endmodule
+''')
+
+    assert "body_var_0_x = 'x;" in rtl
+    assert write in rtl
+    assert "assign body_var_0_x" not in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_send_acknowledge = 0;
+  reg [{int(width) - 1}:0] channel_A_receive_payload = 0;
+  wire channel_A_receive_acknowledge, channel_B_send_request;
+  wire [{int(width) - 1}:0] channel_B_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #150; $fatal(1, "selected Receive/Assign deadlock"); end
+  initial begin
+    channel_A_receive_payload = {payload}; channel_A_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge === 1'b1); channel_A_receive_request = 1'b0;
+    wait (channel_B_send_request === 1'b1);
+    if (channel_B_send_payload !== {expected}) $fatal(1, "selected Receive/Assign payload");
+    channel_B_send_acknowledge = 1'b1; wait (channel_B_send_request === 1'b0);
+    channel_B_send_acknowledge = 1'b0; wait (channel_A_receive_acknowledge === 1'b0);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+def test_source_file_complementary_selected_receives_assemble_whole_variable(tmp_path: Path) -> None:
+    name = "r9b_source_complementary_receives"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(Channel #(4) A, B, Channel #(8) C);
+logic [7:0] x;
+always begin
+  A.Receive(x[3:0]); B.Receive(x[7:4]); C.Send(x);
+end
+endmodule
+''')
+
+    assert "body_var_0_x = 'x;" in rtl
+    assert "body_var_0_x[3:0] = receive_value_0;" in rtl
+    assert "body_var_0_x[7:4] = receive_value_1;" in rtl
+    assert "assign body_var_0_x" not in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_receive_request = 0;
+  reg [3:0] channel_A_receive_payload = 0, channel_B_receive_payload = 0;
+  reg channel_C_send_acknowledge = 0;
+  wire channel_A_receive_acknowledge, channel_B_receive_acknowledge, channel_C_send_request;
+  wire [7:0] channel_C_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #200; $fatal(1, "complementary selected Receive deadlock"); end
+  initial begin
+    channel_A_receive_payload = 4'h3; channel_B_receive_payload = 4'hc;
+    channel_A_receive_request = 1'b1; channel_B_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge && channel_B_receive_acknowledge);
+    channel_A_receive_request = 1'b0; channel_B_receive_request = 1'b0;
+    wait (channel_C_send_request === 1'b1);
+    if (channel_C_send_payload !== 8'hc3) $fatal(1, "selected Receive assembly");
+    channel_C_send_acknowledge = 1'b1; wait (channel_C_send_request === 1'b0);
+    channel_C_send_acknowledge = 1'b0;
+    wait (!channel_A_receive_acknowledge && !channel_B_receive_acknowledge);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+def test_source_file_overlapping_selected_writes_preserve_source_order(tmp_path: Path) -> None:
+    name = "r9b_source_overlapping_writes"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(Channel #(4) A, Channel #(2) B, Channel #(4) C);
+logic [3:0] x;
+logic [1:0] patch;
+always begin
+  A.Receive(x[3:0]);
+  B.Receive(patch);
+  x[2:1] = patch;
+  C.Send(x[3:0]);
+end
+endmodule
+''')
+
+    receive_write = "body_var_0_x[3:0] = receive_value_0;"
+    assign_write = "body_var_0_x[2:1] = body_var_1_patch;"
+    assert rtl.index(receive_write) < rtl.index(assign_write)
+    assert "body_var_0_x = 'x;" in rtl
+    assert "assign body_var_0_x" not in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_receive_request = 0;
+  reg [3:0] channel_A_receive_payload = 0;
+  reg [1:0] channel_B_receive_payload = 0;
+  reg channel_C_send_acknowledge = 0;
+  wire channel_A_receive_acknowledge, channel_B_receive_acknowledge, channel_C_send_request;
+  wire [3:0] channel_C_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #150; $fatal(1, "overlapping selected writes deadlock"); end
+  initial begin
+    channel_A_receive_payload = 4'hf; channel_B_receive_payload = 2'b00;
+    channel_A_receive_request = 1'b1; channel_B_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge && channel_B_receive_acknowledge);
+    channel_A_receive_request = 1'b0; channel_B_receive_request = 1'b0;
+    wait (channel_C_send_request === 1'b1);
+    if (channel_C_send_payload !== 4'h9) $fatal(1, "selected write source order");
+    channel_C_send_acknowledge = 1'b1; wait (channel_C_send_request === 1'b0);
+    channel_C_send_acknowledge = 1'b0;
+    wait (!channel_A_receive_acknowledge && !channel_B_receive_acknowledge);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
+def test_source_file_disjoint_parallel_selected_writes_simulate(tmp_path: Path) -> None:
+    name = "r9b_source_parallel_selected_writes"
+    rtl = _compile_source(tmp_path, name, f'''module {name}(Channel #(4) A, B, Channel #(8) C);
+logic [3:0] a, b;
+logic [7:0] x;
+always begin
+  A.Receive(a); B.Receive(b);
+  fork x[3:0] = a; x[7:4] = b; join
+  C.Send(x);
+end
+endmodule
+''')
+
+    assert "[3:0] = body_var_0_a;" in rtl
+    assert "[7:4] = body_var_1_b;" in rtl
+    assert "assign body_var_" not in rtl
+
+    _simulate_generated(tmp_path, name, rtl, f'''
+module tb;
+  reg reset_n = 0, channel_A_receive_request = 0, channel_B_receive_request = 0;
+  reg [3:0] channel_A_receive_payload = 0, channel_B_receive_payload = 0;
+  reg channel_C_send_acknowledge = 0;
+  wire channel_A_receive_acknowledge, channel_B_receive_acknowledge, channel_C_send_request;
+  wire [7:0] channel_C_send_payload;
+  {name} dut (.*);
+  initial begin #1; reset_n = 1'b1; end
+  initial begin #200; $fatal(1, "parallel selected writes deadlock"); end
+  initial begin
+    channel_A_receive_payload = 4'h5; channel_B_receive_payload = 4'ha;
+    channel_A_receive_request = 1'b1; channel_B_receive_request = 1'b1;
+    wait (channel_A_receive_acknowledge && channel_B_receive_acknowledge);
+    channel_A_receive_request = 1'b0; channel_B_receive_request = 1'b0;
+    wait (channel_C_send_request === 1'b1);
+    if (channel_C_send_payload !== 8'ha5) $fatal(1, "parallel selected payload");
+    channel_C_send_acknowledge = 1'b1; wait (channel_C_send_request === 1'b0);
+    channel_C_send_acknowledge = 1'b0;
+    wait (!channel_A_receive_acknowledge && !channel_B_receive_acknowledge);
+    #2; $finish;
+  end
+endmodule
+''')
+
+
 @pytest.mark.parametrize(("name", "source", "declarations", "setup", "expected"), (
     (
         "r9a_source_external_rhs",
