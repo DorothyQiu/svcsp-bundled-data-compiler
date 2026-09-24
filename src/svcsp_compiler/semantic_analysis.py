@@ -56,6 +56,30 @@ class _Definition:
     valid_when: Guard
 
 
+@dataclass(frozen=True)
+class _LValue:
+    """An exact local Variable and the concrete bits written or read.
+
+    ``bits`` is ``None`` only for an unselected symbolic-width whole Variable;
+    concrete Variables always use an inclusive, normalized bit interval.
+    """
+
+    variable: behavioral.Variable
+    bits: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class _Access:
+    lvalue: _LValue
+    kind: str
+
+
+DefinitionState = dict[
+    int,
+    tuple[behavioral.Variable, dict[int | None, set[_Definition]]],
+]
+
+
 class _Analyzer:
     def __init__(self, decomposed: DecomposedTransaction) -> None:
         self.decomposed = decomposed
@@ -64,13 +88,6 @@ class _Analyzer:
             source.path: source
             for source in transaction.receives + transaction.combinational + transaction.sends
         }
-        self.body_receives = {body_receive.source: body_receive for body_receive in decomposed.body_receives}
-        self.receive_producers: dict[behavioral.Variable, set[RegionOperation]] = {}
-        for body_receive in decomposed.body_receives:
-            target = _target_variable(body_receive.source.operation.target)
-            if target is not None:
-                self.receive_producers.setdefault(target, set()).add(body_receive.source)
-        self.enables_by_source = {enable.source: enable for enable in decomposed.enables}
         # External inputs are module-owned declarations.  Membership must use
         # object identity: a local declaration with the same spelling is not
         # an external input.
@@ -79,6 +96,14 @@ class _Analyzer:
             id(variable): variable
             for variable in transaction.behavioral.variables
         }
+        self.body_receives = {body_receive.source: body_receive for body_receive in decomposed.body_receives}
+        self.receive_producers: list[tuple[_LValue, RegionOperation]] = []
+        for body_receive in decomposed.body_receives:
+            self.receive_producers.append((
+                self._target_lvalue(body_receive.source.operation.target),
+                body_receive.source,
+            ))
+        self.enables_by_source = {enable.source: enable for enable in decomposed.enables}
         self.dependencies: list[SemanticDependency] = []
         self._dependency_keys: set[tuple[object, object, SemanticDependencyKind]] = set()
         self.validity = tuple(
@@ -88,75 +113,96 @@ class _Analyzer:
         )
 
     def run(self) -> SemanticallyValidatedTransaction:
-        self._validate_whole_variable_targets(self.decomposed.transaction.behavioral.body)
+        self._validate_lvalue_targets(self.decomposed.transaction.behavioral.body)
         self._validate_concurrent_receive_targets()
         self._process(self.decomposed.transaction.behavioral.body, (), {}, frozenset())
         return SemanticallyValidatedTransaction(self.decomposed, tuple(self.dependencies), self.validity)
 
-    def _validate_whole_variable_targets(self, process: behavioral.Process) -> None:
+    def _validate_lvalue_targets(self, process: behavioral.Process) -> None:
         if isinstance(process, (behavioral.Receive, behavioral.Assign)):
-            if isinstance(process.target, behavioral.Expression) and process.target.form == 'select':
-                raise SemanticValidationError('R9A does not support selected lvalue targets')
-            target = process.target
-            if not isinstance(target, behavioral.Variable):
-                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
-            if self.local_variables.get(id(target)) is not target:
-                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
+            self._target_lvalue(process.target)
             return
         if isinstance(process, behavioral.Sequence):
             for item in process.items:
-                self._validate_whole_variable_targets(item)
+                self._validate_lvalue_targets(item)
             return
         if isinstance(process, behavioral.Parallel):
             for branch in process.branches:
-                self._validate_whole_variable_targets(branch)
+                self._validate_lvalue_targets(branch)
             return
         if isinstance(process, behavioral.If):
-            self._validate_whole_variable_targets(process.then_branch)
-            self._validate_whole_variable_targets(process.else_branch)
+            self._validate_lvalue_targets(process.then_branch)
+            self._validate_lvalue_targets(process.else_branch)
 
-    def _validate_concurrent_receive_targets(self) -> None:
-        targets: list[behavioral.Variable] = []
-        for body_receive in self.decomposed.body_receives:
-            target = body_receive.source.operation.target
-            if not isinstance(target, behavioral.Variable):
-                raise SemanticValidationError('cannot establish Receive target variable')
+    def _target_lvalue(
+        self,
+        target: behavioral.Variable | behavioral.Expression,
+    ) -> _LValue:
+        if isinstance(target, behavioral.Variable):
             if self.local_variables.get(id(target)) is not target:
                 raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
-            if any(target is previous for previous in targets):
+            return _whole_lvalue(target)
+        if target.form != 'select' or target.variable is None:
+            raise SemanticValidationError('R9B lvalue target must be a local Variable or static selection')
+        variable = target.variable
+        if self.local_variables.get(id(variable)) is not variable:
+            raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
+        width = variable.payload_type.width.bits
+        if width is None:
+            raise SemanticValidationError('R9B does not support selected lvalues on symbolic-width Variables')
+        if len(target.operands) != 1:
+            raise SemanticValidationError('R9B lvalue selector must be one static literal index or range')
+        selector = target.operands[0]
+        if selector.form == 'index' and len(selector.operands) == 1:
+            index = _literal_integer(selector.operands[0])
+            if index is None:
+                raise SemanticValidationError('R9B lvalue index must be a literal integer')
+            interval = (index, index)
+        elif selector.form == 'range' and len(selector.operands) == 2:
+            left = _literal_integer(selector.operands[0])
+            right = _literal_integer(selector.operands[1])
+            if left is None or right is None:
+                raise SemanticValidationError('R9B lvalue range endpoints must be literal integers')
+            interval = (min(left, right), max(left, right))
+        else:
+            raise SemanticValidationError('R9B lvalue selector must be one static literal index or range')
+        if interval[0] < 0 or interval[1] >= width:
+            raise SemanticValidationError('R9B lvalue selection is out of bounds')
+        return _LValue(variable, interval)
+
+    def _validate_concurrent_receive_targets(self) -> None:
+        targets: list[_LValue] = []
+        for body_receive in self.decomposed.body_receives:
+            target = self._target_lvalue(body_receive.source.operation.target)
+            if any(_overlap(target, previous) for previous in targets):
                 raise SemanticValidationError('concurrent Receive targets overlap')
             targets.append(target)
 
-    def _parallel_accesses(self, process: behavioral.Process) -> dict[int, tuple[behavioral.Variable, set[str]]]:
+    def _parallel_accesses(self, process: behavioral.Process) -> list[_Access]:
         """Collect exact local-variable reads and writes in one Parallel branch."""
 
-        accesses: dict[int, tuple[behavioral.Variable, set[str]]] = {}
+        accesses: list[_Access] = []
 
-        def add(variable: behavioral.Variable | None, kind: str) -> None:
-            if variable is None:
+        def add(lvalue: _LValue | None, kind: str) -> None:
+            if lvalue is None:
                 return
-            local = self.local_variables.get(id(variable))
-            if local is not variable:
+            local = self.local_variables.get(id(lvalue.variable))
+            if local is not lvalue.variable:
                 return
-            entry = accesses.get(id(variable))
-            if entry is None:
-                accesses[id(variable)] = (variable, {kind})
-            else:
-                entry[1].add(kind)
+            accesses.append(_Access(lvalue, kind))
 
         def read_expression(expression: behavioral.Expression) -> None:
-            add(expression.variable, 'read')
-            for operand in expression.operands:
-                read_expression(operand)
+            for lvalue in self._expression_lvalues(expression):
+                add(lvalue, 'read')
 
         def visit(item: behavioral.Process) -> None:
             if isinstance(item, behavioral.Receive):
-                add(_target_variable(item.target), 'write')
+                add(self._target_lvalue(item.target), 'write')
                 for selector in item.channel.selectors:
                     read_expression(selector)
                 return
             if isinstance(item, behavioral.Assign):
-                add(_target_variable(item.target), 'write')
+                add(self._target_lvalue(item.target), 'write')
                 read_expression(item.value)
                 return
             if isinstance(item, behavioral.Send):
@@ -184,19 +230,42 @@ class _Analyzer:
         branches = [self._parallel_accesses(branch) for branch in process.branches]
         for index, left in enumerate(branches):
             for right in branches[index + 1:]:
-                for variable_id, (variable, left_kinds) in left.items():
-                    right_entry = right.get(variable_id)
-                    if right_entry is None or right_entry[0] is not variable:
-                        continue
-                    right_kinds = right_entry[1]
-                    if 'write' in left_kinds and ({'read', 'write'} & right_kinds):
+                for left_access in left:
+                    for right_access in right:
+                        if not _overlap(left_access.lvalue, right_access.lvalue):
+                            continue
+                        if left_access.kind == 'read' and right_access.kind == 'read':
+                            continue
+                        variable = left_access.lvalue.variable
                         raise SemanticValidationError(
                             f'Parallel combinational branches conflict on variable {variable.name}'
                         )
-                    if 'write' in right_kinds and ({'read', 'write'} & left_kinds):
-                        raise SemanticValidationError(
-                            f'Parallel combinational branches conflict on variable {variable.name}'
-                        )
+
+    def _expression_lvalues(self, expression: behavioral.Expression) -> tuple[_LValue, ...]:
+        """Return exact local read coverage; dynamic rvalue selects read all bits."""
+
+        accesses: list[_LValue] = []
+
+        def add(variable: behavioral.Variable | None, bits: tuple[int, int] | None) -> None:
+            if variable is not None:
+                accesses.append(_LValue(variable, bits))
+
+        def visit(item: behavioral.Expression) -> None:
+            if item.form == 'select' and item.variable is not None:
+                interval = _static_rvalue_interval(item)
+                add(item.variable, interval if interval is not None else _whole_lvalue(item.variable).bits)
+                # Selector operands may themselves read Variables even though
+                # a dynamic selector conservatively reads the full base.
+                for selector in item.operands:
+                    for operand in selector.operands:
+                        visit(operand)
+                return
+            add(item.variable, _whole_lvalue(item.variable).bits if item.variable is not None else None)
+            for operand in item.operands:
+                visit(operand)
+
+        visit(expression)
+        return tuple(accesses)
 
     def _edge(self, source: RegionOperation | Enable, target: RegionOperation | Enable,
               kind: SemanticDependencyKind) -> None:
@@ -206,8 +275,8 @@ class _Analyzer:
             self.dependencies.append(SemanticDependency(source, target, kind))
 
     def _process(self, process: behavioral.Process, path: SourcePath,
-                 definitions: dict[behavioral.Variable, set[_Definition]], guard: Guard
-                 ) -> dict[behavioral.Variable, set[_Definition]]:
+                 definitions: DefinitionState, guard: Guard
+                 ) -> DefinitionState:
         if isinstance(process, behavioral.Skip):
             return definitions
         if isinstance(process, behavioral.Sequence):
@@ -219,7 +288,7 @@ class _Analyzer:
             self._validate_parallel_noninterference(process)
             branches = [self._process(branch, path + ('parallel', index), _copy_definitions(definitions), guard)
                         for index, branch in enumerate(process.branches)]
-            return _merge_definitions(branches) if branches else definitions
+            return _merge_parallel_definitions(definitions, branches) if branches else definitions
         if isinstance(process, behavioral.If):
             self._read_expression(process.condition, definitions, guard, None)
             then_definitions = self._process(
@@ -236,28 +305,20 @@ class _Analyzer:
             enable = self.enables_by_source.get(source)
             if enable is not None:
                 self._analyze_enable(enable, definitions)
-            target = process.target
-            if not isinstance(target, behavioral.Variable):
-                raise SemanticValidationError('cannot establish Receive target variable')
-            if self.local_variables.get(id(target)) is not target:
-                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
+            target = self._target_lvalue(process.target)
             body_receive = self.body_receives.get(source)
             if body_receive is None:
                 raise SemanticValidationError('missing M4 BODY receive')
             valid_guard = (_guard_for(body_receive.valid_when.condition)
                            if body_receive.valid_when is not None else guard)
             updated = _copy_definitions(definitions)
-            updated[target] = {_Definition(source, guard, valid_guard)}
+            _write_definition(updated, target, _Definition(source, guard, valid_guard))
             return updated
         if isinstance(process, behavioral.Assign):
             self._read_expression(process.value, definitions, guard, source)
-            target = process.target
-            if not isinstance(target, behavioral.Variable):
-                raise SemanticValidationError('cannot establish assignment target variable')
-            if self.local_variables.get(id(target)) is not target:
-                raise SemanticValidationError('R9A BODY write target must be an exact local Variable')
+            target = self._target_lvalue(process.target)
             updated = _copy_definitions(definitions)
-            updated[target] = {_Definition(source, guard, guard)}
+            _write_definition(updated, target, _Definition(source, guard, guard))
             return updated
         if isinstance(process, behavioral.Send):
             enable = self.enables_by_source.get(source)
@@ -271,13 +332,13 @@ class _Analyzer:
         raise SemanticValidationError(f'unsupported behavioral process {type(process).__name__}')
 
     def _analyze_enable(self, enable: Enable,
-                        definitions: dict[behavioral.Variable, set[_Definition]]) -> None:
+                        definitions: DefinitionState) -> None:
         """Analyze every M4 enable at its source occurrence, including composed guards."""
 
         if isinstance(enable.source.operation, behavioral.Receive):
-            for variable in _expression_variables(enable.condition):
-                producers = self.receive_producers.get(variable, set())
-                if any(producer is not enable.source for producer in producers):
+            for lvalue in self._expression_lvalues(enable.condition):
+                if any(_overlap(lvalue, producer) and source is not enable.source
+                       for producer, source in self.receive_producers):
                     raise SemanticValidationError('Receive enable depends on another Receive data')
         self._read_expression(
             enable.condition, definitions, frozenset(), enable,
@@ -286,7 +347,7 @@ class _Analyzer:
         self._edge(enable, enable.source, SemanticDependencyKind.CONTROL)
 
     def _read_expression(self, expression: behavioral.Expression,
-                         definitions: dict[behavioral.Variable, set[_Definition]], guard: Guard,
+                         definitions: DefinitionState, guard: Guard,
                          target: RegionOperation | Enable | None, *, receive_enable: bool = False) -> None:
         if expression.form == 'conditional' and len(expression.operands) == 3:
             predicate, then_value, else_value = expression.operands
@@ -302,25 +363,30 @@ class _Analyzer:
             right_guard = _extend(guard, left, expression.operator == '&&')
             self._read_expression(right, definitions, right_guard, target, receive_enable=receive_enable)
             return
-        for variable in _expression_variables(expression):
-            reaching = definitions.get(variable, set())
-            if not reaching:
-                if not any(variable is external for external in self.external_inputs):
-                    raise SemanticValidationError(
-                        f'variable read has no reaching local definition and is not an explicit external input: '
-                        f'{variable.name}'
-                    )
-                continue
-            if receive_enable and any(isinstance(definition.source.operation, (behavioral.Receive, behavioral.Assign))
-                                      for definition in reaching):
+        for access in self._expression_lvalues(expression):
+            variable = access.variable
+            entry = definitions.get(id(variable))
+            if entry is None or entry[0] is not variable:
+                if any(variable is external for external in self.external_inputs):
+                    continue
                 raise SemanticValidationError(
-                    'Conditional Receive enable may depend only on literals, parameters, and explicit external inputs'
+                    f'variable read has no reaching local definition and is not an explicit external input: '
+                    f'{variable.name}'
                 )
-            if not _definitions_cover(reaching, guard):
-                raise SemanticValidationError(f'conditional receive data {variable.name} is not valid under this guard')
-            if target is not None:
-                for definition in reaching:
-                    self._edge(definition.source, target, SemanticDependencyKind.DATA)
+            for bit in _bits(access):
+                reaching = entry[1].get(bit, set())
+                if receive_enable and any(isinstance(definition.source.operation, (behavioral.Receive, behavioral.Assign))
+                                          for definition in reaching):
+                    raise SemanticValidationError(
+                        'Conditional Receive enable may depend only on literals, parameters, and explicit external inputs'
+                    )
+                if not _definitions_cover(reaching, guard):
+                    raise SemanticValidationError(
+                        f'conditional receive data {variable.name} is not valid under this guard'
+                    )
+                if target is not None:
+                    for definition in reaching:
+                        self._edge(definition.source, target, SemanticDependencyKind.DATA)
 
 
 def analyze_semantics(decomposed: DecomposedTransaction) -> SemanticallyValidatedTransaction:
@@ -331,15 +397,62 @@ def analyze_semantics(decomposed: DecomposedTransaction) -> SemanticallyValidate
     return _Analyzer(decomposed).run()
 
 
-def _target_variable(target: behavioral.Variable | behavioral.Expression) -> behavioral.Variable | None:
-    return target if isinstance(target, behavioral.Variable) else target.variable
+def _whole_lvalue(variable: behavioral.Variable) -> _LValue:
+    width = variable.payload_type.width.bits
+    return _LValue(variable, None if width is None else (0, width - 1))
 
 
-def _expression_variables(expression: behavioral.Expression) -> set[behavioral.Variable]:
-    variables = {expression.variable} if expression.variable is not None else set()
-    for operand in expression.operands:
-        variables |= _expression_variables(operand)
-    return variables
+def _literal_integer(expression: behavioral.Expression) -> int | None:
+    if expression.form != 'literal' or expression.value is None:
+        return None
+    text = expression.value.replace('_', '')
+    try:
+        if "'" in text:
+            _, value = text.split("'", 1)
+            if not value or value[0].lower() not in {'d', 'h', 'o', 'b'}:
+                return None
+            base = {'d': 10, 'h': 16, 'o': 8, 'b': 2}[value[0].lower()]
+            return int(value[1:], base)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
+def _static_rvalue_interval(expression: behavioral.Expression) -> tuple[int, int] | None:
+    """Return a static in-bounds interval, or conservatively read all bits."""
+
+    if expression.form != 'select' or expression.variable is None:
+        return None
+    width = expression.variable.payload_type.width.bits
+    if width is None or len(expression.operands) != 1:
+        return None
+    selector = expression.operands[0]
+    if selector.form == 'index' and len(selector.operands) == 1:
+        index = _literal_integer(selector.operands[0])
+        interval = None if index is None else (index, index)
+    elif selector.form == 'range' and len(selector.operands) == 2:
+        left = _literal_integer(selector.operands[0])
+        right = _literal_integer(selector.operands[1])
+        interval = None if left is None or right is None else (min(left, right), max(left, right))
+    else:
+        return None
+    if interval is None or interval[0] < 0 or interval[1] >= width:
+        return None
+    return interval
+
+
+def _overlap(left: _LValue, right: _LValue) -> bool:
+    if left.variable is not right.variable:
+        return False
+    if left.bits is None or right.bits is None:
+        return True
+    return left.bits[0] <= right.bits[1] and right.bits[0] <= left.bits[1]
+
+
+def _bits(lvalue: _LValue) -> tuple[int | None, ...]:
+    if lvalue.bits is None:
+        return (None,)
+    return tuple(range(lvalue.bits[0], lvalue.bits[1] + 1))
 
 
 def _extend(guard: Guard, expression: behavioral.Expression, positive: bool = True) -> Guard:
@@ -354,17 +467,91 @@ def _guard_for(expression: behavioral.Expression) -> Guard:
     return _extend(frozenset(), expression)
 
 
-def _copy_definitions(definitions: dict[behavioral.Variable, set[_Definition]]) -> dict[behavioral.Variable, set[_Definition]]:
-    return {variable: set(values) for variable, values in definitions.items()}
+def _copy_definitions(definitions: DefinitionState) -> DefinitionState:
+    return {
+        variable_id: (variable, {bit: set(values) for bit, values in coverage.items()})
+        for variable_id, (variable, coverage) in definitions.items()
+    }
 
 
-def _merge_definitions(flows: list[dict[behavioral.Variable, set[_Definition]]]
-                       ) -> dict[behavioral.Variable, set[_Definition]]:
-    merged: dict[behavioral.Variable, set[_Definition]] = {}
+def _write_definition(
+    definitions: DefinitionState,
+    target: _LValue,
+    definition: _Definition,
+) -> None:
+    variable_id = id(target.variable)
+    entry = definitions.get(variable_id)
+    if entry is None:
+        coverage: dict[int | None, set[_Definition]] = {}
+        definitions[variable_id] = (target.variable, coverage)
+    elif entry[0] is target.variable:
+        coverage = entry[1]
+    else:
+        raise SemanticValidationError('definition identity collision')
+    for bit in _bits(target):
+        coverage[bit] = {definition}
+
+
+def _merge_definitions(flows: list[DefinitionState]) -> DefinitionState:
+    merged: DefinitionState = {}
     for definitions in flows:
-        for variable, values in definitions.items():
-            merged.setdefault(variable, set()).update(values)
+        for variable_id, (variable, coverage) in definitions.items():
+            entry = merged.get(variable_id)
+            if entry is None:
+                target_coverage: dict[int | None, set[_Definition]] = {}
+                merged[variable_id] = (variable, target_coverage)
+            elif entry[0] is variable:
+                target_coverage = entry[1]
+            else:
+                raise SemanticValidationError('definition identity collision')
+            for bit, values in coverage.items():
+                target_coverage.setdefault(bit, set()).update(values)
     return merged
+
+
+def _merge_parallel_definitions(initial: DefinitionState, flows: list[DefinitionState]) -> DefinitionState:
+    """Merge noninterfering Parallel branches without retaining stale slices.
+
+    Every branch begins with ``initial``.  For any bit changed by one proven
+    noninterfering branch, that branch's coverage replaces the inherited bit
+    coverage; untouched bits retain their inherited coverage.
+    """
+
+    result = _copy_definitions(initial)
+    variable_ids = set(initial)
+    for flow in flows:
+        variable_ids.update(flow)
+    for variable_id in variable_ids:
+        initial_entry = initial.get(variable_id)
+        entries = [flow.get(variable_id) for flow in flows]
+        variable = (
+            initial_entry[0]
+            if initial_entry is not None
+            else next(entry[0] for entry in entries if entry is not None)
+        )
+        if any(entry is not None and entry[0] is not variable for entry in entries):
+            raise SemanticValidationError('definition identity collision')
+        initial_coverage = initial_entry[1] if initial_entry is not None else {}
+        bits = set(initial_coverage)
+        for entry in entries:
+            if entry is not None:
+                bits.update(entry[1])
+        coverage = result.setdefault(variable_id, (variable, {}))[1]
+        for bit in bits:
+            prior = initial_coverage.get(bit, set())
+            changed = [
+                entry[1].get(bit, set())
+                for entry in entries
+                if entry is not None and not _same_definitions(entry[1].get(bit, set()), prior)
+            ]
+            if len(changed) > 1:
+                raise SemanticValidationError('Parallel combinational branches overlap')
+            coverage[bit] = set(changed[0] if changed else prior)
+    return result
+
+
+def _same_definitions(left: set[_Definition], right: set[_Definition]) -> bool:
+    return len(left) == len(right) and all(any(item is other for other in right) for item in left)
 
 
 def _definitions_cover(definitions: set[_Definition], current_guard: Guard) -> bool:

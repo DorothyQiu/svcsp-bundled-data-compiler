@@ -613,16 +613,103 @@ def test_sequential_reassignment_and_guarded_definitions_remain_legal() -> None:
 
 
 @pytest.mark.parametrize("source", (
-    '''module m(Channel #(1) A, B); logic x; always begin
+    '''module bit_receive(Channel #(1) A, B); logic [7:0] x; always begin
         A.Receive(x[0]); B.Send(x[0]);
     end endmodule''',
-    '''module m(Channel #(1) A, B); logic a, x; always begin
-        A.Receive(a); x[0] = a; B.Send(a);
+    '''module bit_assign(input logic value, Channel #(1) A, B); logic a, x; always begin
+        A.Receive(a); x[0] = value; B.Send(x[0]);
     end endmodule''',
-), ids=("receive_target", "assign_target"))
-def test_selected_lvalue_targets_are_temporarily_rejected(source: str) -> None:
+    '''module range_receive(Channel #(4) A, B); logic [7:0] x; always begin
+        A.Receive(x[3:0]); B.Send(x[3:0]);
+    end endmodule''',
+    '''module range_assign(input logic [3:0] value, Channel #(1) A, Channel #(4) B); logic a; logic [7:0] x; always begin
+        A.Receive(a); x[3:0] = value; B.Send(x[3:0]);
+    end endmodule''',
+), ids=("bit_receive", "bit_assign", "range_receive", "range_assign"))
+def test_static_selected_lvalue_targets_are_supported(source: str) -> None:
+    _analyze_source(source)
 
-    with pytest.raises(SemanticValidationError, match="R9A does not support selected lvalue targets"):
+
+def test_disjoint_static_ranges_jointly_cover_a_whole_variable_read() -> None:
+    _analyze_source('''module ranges(Channel #(4) A, B, Channel #(8) C); logic [7:0] x;
+always begin A.Receive(x[3:0]); B.Receive(x[7:4]); C.Send(x); end
+endmodule''')
+
+
+def test_selected_read_requires_full_coverage_but_distinct_bits_remain_independent() -> None:
+    with pytest.raises(SemanticValidationError, match="conditional receive data x is not valid"):
+        _analyze_source('''module partial(Channel #(1) A, B, Channel #(8) C); logic [7:0] x;
+always begin A.Receive(x[0]); B.Receive(x[1]); C.Send(x); end
+endmodule''')
+    _analyze_source('''module selected(Channel #(1) A, B, C); logic [7:0] x;
+always begin A.Receive(x[0]); B.Receive(x[1]); C.Send(x[1]); end
+endmodule''')
+
+
+def test_overlapping_sequential_write_replaces_only_its_interval() -> None:
+    program = _Program()
+    value = program.condition("value")
+    receive = program.receive("A", "x")
+    assign = Assign(_select_bit(program.name("x")), value)
+    send = program.send("B", _select_bit(program.name("x")))
+    validated = _analyze(program, Sequence((receive, assign, send)))
+
+    data_sources = {
+        dependency.source
+        for dependency in validated.dependencies
+        if dependency.target.operation is send
+        and dependency.kind is SemanticDependencyKind.DATA
+    }
+    assert data_sources == {next(source for source in validated.decomposed.transaction.combinational
+                                  if source.operation is assign)}
+
+
+def test_guarded_branch_merges_preserve_selected_bit_coverage() -> None:
+    program = _Program()
+    select = program.condition("select")
+    body = Sequence((
+        program.receive("A", "a"),
+        If(select,
+           Assign(_select_bit(program.name("x")), program.name("a")),
+           Assign(_select_bit(program.name("x")), program.name("a"))),
+        program.send("B", _select_bit(program.name("x"))),
+    ))
+    _analyze(program, body)
+
+
+def test_parallel_static_slices_are_interval_aware() -> None:
+    _analyze_source('''module disjoint(Channel #(1) A, B, C, D); logic a, b; logic [7:0] x;
+always begin
+  A.Receive(a); B.Receive(b);
+  fork x[0] = a; x[1] = b; join
+  C.Send(x[0]); D.Send(x[1]);
+end
+endmodule''')
+
+    with pytest.raises(SemanticValidationError, match="Parallel combinational branches conflict"):
+        _analyze_source('''module overlap(Channel #(2) A, Channel #(1) B, C); logic [1:0] a; logic b; logic [7:0] x;
+always begin
+  A.Receive(a); B.Receive(b);
+  fork x[1:0] = a; x[0] = b; join
+  C.Send(x[0]);
+end
+endmodule''')
+
+
+@pytest.mark.parametrize(("source", "match"), (
+    ('''module dynamic(input logic i, Channel #(1) A, B); logic [7:0] x; always begin
+        A.Receive(x[i]); B.Send(x[0]); end endmodule''', 'literal integer'),
+    ('''module parameter_index #(parameter int P = 0) (Channel #(1) A, B); logic [7:0] x; always begin
+        A.Receive(x[P]); B.Send(x[0]); end endmodule''', 'literal integer'),
+    ('''module symbolic #(parameter int W = 8) (Channel #(1) A, B); logic [W-1:0] x; always begin
+        A.Receive(x[0]); B.Send(x[0]); end endmodule''', 'symbolic-width'),
+    ('''module bounds(Channel #(1) A, B); logic [7:0] x; always begin
+        A.Receive(x[8]); B.Send(x[0]); end endmodule''', 'out of bounds'),
+    ('''module range_bounds(Channel #(2) A, B); logic [7:0] x; always begin
+        A.Receive(x[9:8]); B.Send(x[1:0]); end endmodule''', 'out of bounds'),
+), ids=("dynamic", "parameter", "symbolic", "bit_bounds", "range_bounds"))
+def test_unsupported_selected_lvalue_forms_fail_closed(source: str, match: str) -> None:
+    with pytest.raises(SemanticValidationError, match=match):
         _analyze_source(source)
 
 
