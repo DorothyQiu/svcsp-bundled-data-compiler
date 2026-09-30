@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pyslang.ast import (
     Compilation,
@@ -11,6 +13,7 @@ from pyslang.syntax import SyntaxTree
 from svcsp_compiler.semantic_frontend import (
     SemanticFrontendError,
     SemanticContext,
+    parse_file,
     parse_text,
 )
 
@@ -88,3 +91,65 @@ def test_text_frontend_retains_one_native_resolved_context() -> None:
 def test_invalid_diagnostics_raise_semantic_frontend_error(source: str) -> None:
     with pytest.raises(SemanticFrontendError):
         parse_text(source, "invalid.sv")
+
+
+def test_parse_file_returns_native_resolved_context(tmp_path) -> None:
+    source = tmp_path / "simple.sv"
+    source.write_text(SOURCE)
+
+    context = parse_file(source)
+
+    assert isinstance(context.syntax_tree, SyntaxTree)
+    assert isinstance(context.compilation, Compilation)
+    assert context.root is context.compilation.getRoot()
+    assert context.root.topInstances[0].body.find("x").type.bitWidth == 8
+
+
+def test_parse_file_preprocesses_include_dirs_and_macros(tmp_path) -> None:
+    include_dir = tmp_path / "include"
+    include_dir.mkdir()
+    (include_dir / "definitions.svh").write_text("""\
+`define WIDTH 8
+`define COPY_INPUT x = in;
+""")
+    source = tmp_path / "preprocessed.sv"
+    source.write_text("""\
+`include "definitions.svh"
+module preprocessed #(parameter int W = `WIDTH) (input logic [`WIDTH-1:0] in);
+  logic [`WIDTH-1:0] x;
+  always begin
+    `COPY_INPUT
+    x = x;
+  end
+endmodule
+""")
+
+    context = parse_file(source, include_dirs=(include_dir,))
+    module = context.root.topInstances[0].body
+    x = module.find("x")
+    assert isinstance(x, VariableSymbol)
+    assert x.type.bitWidth == 8
+    assert module.find("x") is x
+
+    statements = _procedure(module).body.body.list
+    assert len(statements) == 2
+    first_assignment, second_assignment = (statement.expr for statement in statements)
+    assert first_assignment.left.symbol is x
+    assert second_assignment.right.symbol is x
+
+    location = context.source_manager.getFullyExpandedLoc(first_assignment.sourceRange.start)
+    assert Path(str(context.source_manager.getFileName(location))).resolve() == source.resolve()
+    assert context.source_manager.getLineNumber(location) == 5
+
+
+def test_parse_file_missing_source_raises_file_not_found(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        parse_file(tmp_path / "missing.sv")
+
+
+def test_parse_file_preprocessing_diagnostic_raises_semantic_frontend_error(tmp_path) -> None:
+    source = tmp_path / "missing_include.sv"
+    source.write_text('`include "missing.svh"\nmodule m; endmodule\n')
+
+    with pytest.raises(SemanticFrontendError):
+        parse_file(source)
