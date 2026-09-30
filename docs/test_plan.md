@@ -79,7 +79,7 @@ The frontend tests must not require:
 - manual width inference;
 - asynchronous hardware decisions.
 
-Future frontend coverage should include:
+Additional frontend coverage includes:
 
 - file input;
 - preprocessing;
