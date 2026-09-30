@@ -1,2 +1,0 @@
-[console_scripts]
-svcsp = svcsp.__main__:main

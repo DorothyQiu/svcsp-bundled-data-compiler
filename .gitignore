@@ -4,5 +4,4 @@ __pycache__/
 .pytest_cache/
 build/
 *.vvp
-examples/waveforms/*.vcd
 *.egg-info/

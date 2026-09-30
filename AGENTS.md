@@ -1,81 +1,36 @@
 # Project Goal
 
-Compile the supported SVCSP subset to synthesizable asynchronous RTL.
+Compile the supported SVCSP subset into synthesizable asynchronous RTL.
 
-The current compiler architecture is defined by:
-
-```text
-docs/compiler_design.md
-```
-
-This document is the normative architecture specification for new compiler work.
-
----
+The compiler is being rebuilt from a clean architecture boundary.
 
 # Architecture Authority
 
-Before modifying compiler architecture or implementing a new compiler stage, read:
+Before modifying compiler architecture or implementing a compiler stage, read:
 
 ```text
 docs/compiler_design.md
 ```
 
-If existing implementation code or older documentation conflicts with
-`docs/compiler_design.md`, follow `docs/compiler_design.md`.
+`docs/compiler_design.md` is the normative architecture specification.
 
-Do not infer the intended architecture from legacy Python, RTL, tests, or older
-compiler-flow documents.
-
-Do not preserve a legacy abstraction solely because existing code depends on it.
-
-When a conflict is found between the current implementation and the design
-specification, report the conflict explicitly rather than silently adapting the
-new design to the old code.
-
----
-
-# Legacy Documentation
-
-The repository contains older compiler and backend documentation, including:
+The previous M1–M7 implementation is preserved at:
 
 ```text
-docs/compiler_flow.md
-docs/communication_decomposition.md
-docs/four_phase_bundled_data_backend.md
-docs/supported_architectures.md
-docs/verification_plan.md
+legacy-m1-m7
 ```
 
-These documents may still contain useful:
+Historical code may be consulted for algorithms, tests, implementation ideas,
+or backend experiments, but it is not authoritative for the current compiler.
 
-```text
-source-language restrictions
-previous backend semantics
-test requirements
-RTL implementation details
-historical design rationale
-```
+If historical code conflicts with `docs/compiler_design.md`, follow the design
+specification.
 
-However, they are not authoritative for the new compiler architecture when they
-conflict with `docs/compiler_design.md`.
+Do not reintroduce a legacy abstraction solely because it existed before.
 
-In particular, do not assume that the new compiler must preserve:
+# Compiler Architecture
 
-```text
-Behavioral CSP IR
-Transaction Extraction
-Conditional Communication Decomposition
-BODY / Enable / EN_RECV / EN_SEND
-fixed M1-M7 phase ownership
-```
-
-unless their use is independently justified by the current design specification.
-
----
-
-# Compiler Architecture Rules
-
-The intended high-level flow is:
+The intended flow is:
 
 ```text
 pyslang Semantic Frontend
@@ -99,10 +54,16 @@ Template Binding
 Synthesizable SystemVerilog
 ```
 
-Use `pyslang` for SystemVerilog semantic parsing.
+Keep compiler stages separated according to this architecture.
 
-Parse and semantically resolve source once. Reuse the resolved semantic context
-in later stages rather than independently reparsing source text.
+# Semantic Frontend Rules
+
+Use `pyslang` for parsing and semantic resolution.
+
+Parse and semantically resolve source once.
+
+Reuse the resolved native pyslang semantic context rather than converting the
+syntax tree into an independent pseudo-semantic representation.
 
 Preserve:
 
@@ -111,7 +72,7 @@ Channel identity
 variable identity
 parameter identity
 expression semantics
-type and width information
+resolved types and widths
 source ordering
 source locations when useful
 ```
@@ -121,11 +82,12 @@ Fail closed when required semantics cannot be resolved.
 Do not silently resize, truncate, extend, reinterpret, or otherwise change
 source behavior.
 
----
+Avoid introducing another behavioral IR between pyslang semantics and the USG
+unless a concrete requirement is identified and documented.
 
 # USG Rules
 
-The initial core USG node kinds are:
+Initial core node kinds:
 
 ```text
 Receive
@@ -134,7 +96,7 @@ Assign
 Predicate
 ```
 
-The initial core dependency edge kinds are:
+Initial dependency edge kinds:
 
 ```text
 DATA
@@ -143,40 +105,56 @@ CONTROL
 
 The USG represents source semantics and dependencies.
 
-The USG is not:
+It is not:
 
 ```text
+a complete SystemVerilog AST
 a netlist
 an asynchronous controller graph
 a pipeline-stage graph
-a template instance graph
-a complete SystemVerilog AST
+a template-instance graph
 ```
 
-Do not introduce hardware placement decisions during graph construction.
+Graph construction must not make asynchronous hardware-placement decisions.
 
-DATA and CONTROL edges do not directly imply stage boundaries or physical
-handshake structures.
+DATA and CONTROL edges do not directly imply stage boundaries or handshake
+structures.
 
-Preserve communication ordering separately from ordinary data dependence.
+Communication ordering is semantically significant and must be preserved
+separately from ordinary DATA dependence.
 
-For an assignment such as:
+For:
 
 ```systemverilog
 x = x + a;
 ```
 
-do not create an artificial Assign self-loop merely because `x` appears on both
-sides.
+do not create an artificial Assign self-loop.
 
-Old/new value semantics are handled through source ordering, definition/use
-analysis, and later Pipeline + State Planning.
+The RHS consumes the earlier value of `x`; the LHS defines the later value.
+Definition/use ordering and later Pipeline + State Planning preserve this
+semantic distinction.
 
----
+# Legality and Analysis Rules
 
-# Planning and Backend Rules
+Keep these concepts distinct:
 
-Pipeline + State Planning owns decisions such as:
+```text
+source / language legality
+semantic dependency analysis
+backend realizability
+generated RTL validation
+```
+
+A legal synthesizable SystemVerilog construct may still be unsupported by the
+current asynchronous backend.
+
+Reject unsupported behavior explicitly rather than forcing it into an existing
+hardware pattern.
+
+# Planning Rules
+
+Pipeline + State Planning owns decisions including:
 
 ```text
 stage boundaries
@@ -185,12 +163,22 @@ predicate placement
 cross-stage values
 required storage
 state lifetime
+datapath-to-control relationships
 ```
+
+DATA dependence alone does not automatically imply a stage boundary.
+
+When a value must survive across a communication or stage boundary, planning
+must explicitly preserve it.
+
+Do not assume stage-local datapaths are always purely combinational.
+
+# Async Microarchitecture Rules
 
 Async Microarchitecture is the first layer that should contain explicit
 asynchronous hardware organization.
 
-It may contain concepts such as:
+It may represent:
 
 ```text
 stages
@@ -203,63 +191,52 @@ storage resources
 matched-delay requirements
 ```
 
-Template Binding maps the selected Async Microarchitecture onto concrete
-handshake templates.
+Keep this representation independent enough from a specific RTL template
+family to permit alternative asynchronous implementations.
 
-Do not move template-specific decisions into the frontend or USG merely because
-the current RTL library makes that convenient.
+# Template Binding and RTL Rules
 
-RTL generation must realize an already selected architecture. It must not invent
-new semantic dependencies, storage requirements, or communication ordering.
+Template Binding maps an already selected Async Microarchitecture onto concrete
+asynchronous templates.
 
----
+Template-specific decisions must not leak backward into the frontend or USG.
 
-# Synthesizability and Realizability
+RTL generation realizes the selected architecture; it must not invent semantic
+dependencies, communication ordering, or storage requirements.
 
-Keep these concepts separate:
+# Historical Code
 
-```text
-source / language legality
-backend realizability
-generated RTL validation
+Historical files can be inspected with:
+
+```bash
+git show legacy-m1-m7:<path>
 ```
 
-A construct may be legal synthesizable SystemVerilog but unsupported by the
-current asynchronous backend.
-
-Reject unsupported constructs explicitly.
-
-Where practical, reuse existing synthesis or lint tools for final validation
-instead of implementing a complete SystemVerilog synthesizability checker.
-
----
-
-# Reuse of Existing Code
-
-The existing implementation is a reference and source of reusable components,
-not the architecture specification.
-
-Reuse existing code when its semantics match `docs/compiler_design.md`.
-
-Potentially reusable assets include:
+Potentially useful historical material includes:
 
 ```text
-pyslang frontend utilities
-semantic-resolution helpers
-expression and width handling
-source examples
-tests and fixtures
+pyslang experiments
+expression and width algorithms
+test scenarios
+semantic-analysis algorithms
+RTL templates
 simulation infrastructure
-RTL libraries
-backend implementation ideas
+backend experiments
 ```
 
-Do not broadly refactor legacy code before determining whether it belongs in the
-new architecture.
+Do not copy a historical API or data model merely because one of its internal
+algorithms is useful.
 
-Prefer building the new path incrementally alongside the legacy implementation.
+The following historical abstractions are not automatically part of the new
+compiler:
 
----
+```text
+Behavioral CSP IR
+Transaction Extraction
+Conditional Communication Decomposition
+BODY / Enable / EN_RECV / EN_SEND
+fixed M1-M7 phase ownership
+```
 
 # Development Rules
 
@@ -269,36 +246,25 @@ Before implementing a task:
 
 ```text
 1. read the relevant section of docs/compiler_design.md
-2. inspect only the implementation needed for the current task
-3. identify reusable code and legacy conflicts
+2. inspect only the material needed for the current task
+3. identify the required semantic contract
 4. add or update focused tests
 5. make the smallest implementation change
 6. run focused tests
 7. run broader regression when appropriate
 ```
 
-Do not redesign a later compiler stage merely to make an earlier-stage test pass.
-
 Do not introduce a new compiler IR, graph abstraction, stage abstraction, or
-backend semantic rule without a clear need justified against
+backend semantic rule without a concrete need justified against
 `docs/compiler_design.md`.
 
-If the specification leaves an architectural question open, report the question
-rather than silently choosing a legacy behavior.
-
----
+If the design specification leaves a question open, report it instead of
+silently choosing historical behavior.
 
 # Development Commands
 
-Activate the repository environment with:
-
 ```bash
 source .venv/bin/activate
-```
-
-Run tests with:
-
-```bash
 pytest -q
 ```
 
@@ -309,10 +275,6 @@ git diff --check
 pytest -q
 ```
 
-Use focused test invocations during development whenever possible.
-
----
-
 # Implementation-Agent Reporting
 
 After each implementation task, report:
@@ -322,8 +284,8 @@ changed files
 tests added or modified
 tests executed
 test results
-legacy-code conflicts found
+historical-code conflicts found
 design questions or ambiguities found
 ```
 
-Do not hide unresolved architecture conflicts by adding compatibility behavior.
+Do not hide unresolved architectural conflicts by adding compatibility behavior.
