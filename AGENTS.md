@@ -13,6 +13,7 @@ docs/compiler_design.md
 ```
 
 `docs/compiler_design.md` is the normative architecture specification.
+Verification strategy is defined in `docs/test_plan.md`.
 
 The previous M1–M7 implementation is preserved at:
 
