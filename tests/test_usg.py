@@ -11,7 +11,9 @@ from svcsp_compiler.usg import (
     PredicateNode,
     ReceiveNode,
     SendNode,
+    USGBuilderError,
     UnifiedSemanticGraph,
+    build_straight_line_usg,
 )
 
 
@@ -99,3 +101,116 @@ def test_model_contains_only_native_references_and_semantic_edge_endpoints() -> 
         hasattr(graph, name)
         for name in ("stages", "registers", "handshakes", "templates", "enables", "communication_order")
     )
+
+
+STRAIGHT_LINE_SOURCE = """\
+interface Channel;
+  task Receive(output logic [7:0] data); endtask
+  task Send(input logic [7:0] data); endtask
+endinterface
+
+module straight(Channel A, B);
+  logic [7:0] a, b, t;
+  always begin
+    A.Receive(a);
+    t = a + b;
+    B.Send(t);
+  end
+endmodule
+"""
+
+
+def _block(source: str):
+    context = parse_text(source, "straight_line.sv")
+    module = context.root.topInstances[0].body
+    visited = []
+    module.visit(visited.append)
+    return next(item for item in visited if isinstance(item, ProceduralBlockSymbol)).body
+
+
+def test_straight_line_builder_uses_native_objects_and_data_dependencies() -> None:
+    block = _block(STRAIGHT_LINE_SOURCE)
+    statements = block.body.list
+
+    graph = build_straight_line_usg(block)
+
+    receive, assign, send = graph.nodes
+    assert isinstance(receive, ReceiveNode)
+    assert isinstance(assign, AssignNode)
+    assert isinstance(send, SendNode)
+    assert receive.semantic_object is statements[0].expr
+    assert assign.semantic_object is statements[1].expr
+    assert send.semantic_object is statements[2].expr
+    assert graph.data_edges == (
+        DataEdge(receive, assign),
+        DataEdge(assign, send),
+    )
+    assert graph.control_edges == ()
+
+
+def test_builder_processes_self_assignment_uses_before_its_definition() -> None:
+    block = _block("""\
+interface Channel;
+  task Receive(output logic [7:0] data); endtask
+  task Send(input logic [7:0] data); endtask
+endinterface
+
+module self_assign(Channel A, B, input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    A.Receive(x);
+    x = x + a;
+    B.Send(x);
+  end
+endmodule
+""")
+
+    graph = build_straight_line_usg(block)
+    receive, assign, send = graph.nodes
+
+    assert graph.data_edges == (
+        DataEdge(receive, assign),
+        DataEdge(assign, send),
+    )
+    assert not any(edge.source is assign and edge.target is assign for edge in graph.data_edges)
+
+
+def test_builder_rejects_unsupported_executable_statement_forms() -> None:
+    block = _block("""\
+module unsupported(input logic a);
+  logic x;
+  always begin
+    if (a) x = a;
+  end
+endmodule
+""")
+
+    with pytest.raises(USGBuilderError, match="unsupported executable statement"):
+        build_straight_line_usg(block)
+
+
+@pytest.mark.parametrize(
+    ("task_name", "direction"),
+    (("UnrelatedOutput", "output"), ("UnrelatedInput", "input")),
+)
+def test_builder_rejects_unrelated_interface_tasks(
+    task_name: str, direction: str
+) -> None:
+    block = _block(
+        f"""
+        interface Other;
+          task {task_name}({direction} logic [7:0] payload);
+          endtask
+        endinterface
+
+        module top(Other endpoint);
+          logic [7:0] value;
+          always begin
+            endpoint.{task_name}(value);
+          end
+        endmodule
+        """
+    )
+
+    with pytest.raises(USGBuilderError, match="expected Receive or Send"):
+        build_straight_line_usg(block)
