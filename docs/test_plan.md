@@ -116,6 +116,7 @@ Required invariants include:
 - DATA edges represent actual value dependencies;
 - CONTROL edges represent predicate control;
 - communication source ordering is preserved separately from DATA dependence;
+- `UnifiedSemanticGraph.nodes` preserves builder source or expanded semantic-occurrence order without fabricating a DATA edge;
 - `x = x + a` does not create an artificial Assign self-loop;
 - graph construction does not introduce stage boundaries;
 - graph construction does not bind asynchronous templates;

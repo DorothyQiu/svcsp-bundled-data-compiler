@@ -148,6 +148,34 @@ def test_straight_line_builder_uses_native_objects_and_data_dependencies() -> No
     assert graph.control_edges == ()
 
 
+def test_builder_preserves_receive_occurrence_order_without_data_dependency() -> None:
+    block = _block("""\
+interface Channel;
+  task Receive(output logic [7:0] data); endtask
+endinterface
+
+module receive_order(Channel A, B);
+  logic [7:0] a, b;
+  always begin
+    A.Receive(a);
+    B.Receive(b);
+  end
+endmodule
+""")
+    first_statement, second_statement = block.body.list
+
+    graph = build_straight_line_usg(block)
+    first_receive, second_receive = graph.nodes
+
+    assert isinstance(first_receive, ReceiveNode)
+    assert isinstance(second_receive, ReceiveNode)
+    assert first_receive.semantic_object is first_statement.expr
+    assert second_receive.semantic_object is second_statement.expr
+    assert str(first_receive.semantic_object.syntax).strip() == "A.Receive(a)"
+    assert str(second_receive.semantic_object.syntax).strip() == "B.Receive(b)"
+    assert graph.data_edges == ()
+
+
 def test_builder_processes_self_assignment_uses_before_its_definition() -> None:
     block = _block("""\
 interface Channel;

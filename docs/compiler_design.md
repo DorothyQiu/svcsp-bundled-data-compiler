@@ -224,6 +224,7 @@ In particular:
 - Graph construction must not insert asynchronous storage.
 - Graph construction must not bind handshake templates.
 - Communication source order must be preserved as semantic ordering information.
+- `UnifiedSemanticGraph.nodes` preserves builder source or expanded semantic-occurrence order; this does not add an ORDER edge.
 - Source semantic identity must remain recoverable from USG nodes.
 
 ---

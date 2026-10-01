@@ -64,7 +64,11 @@ class USGBuilderError(ValueError):
 
 
 class UnifiedSemanticGraph:
-    """An insertion-ordered collection of semantic nodes and relations."""
+    """Semantic nodes and relations with builder insertion order exposed by ``nodes``.
+
+    Builders insert nodes in source or expanded semantic-occurrence order.
+    That occurrence order is not represented by a DATA or CONTROL edge.
+    """
 
     __slots__ = ("_nodes", "_data_edges", "_control_edges")
 
@@ -75,6 +79,7 @@ class UnifiedSemanticGraph:
 
     @property
     def nodes(self) -> tuple[USGNode, ...]:
+        """Nodes in builder insertion (source / expanded occurrence) order."""
         return tuple(self._nodes)
 
     @property
@@ -115,7 +120,7 @@ class UnifiedSemanticGraph:
 
 
 def build_straight_line_usg(block: BlockStatement) -> UnifiedSemanticGraph:
-    """Build Receive, Assign, and Send DATA flow from one sequential block."""
+    """Build nodes and DATA flow in sequential source / expanded occurrence order."""
 
     if not isinstance(block, BlockStatement):
         raise USGBuilderError("unsupported executable statement: expected a native BlockStatement")
