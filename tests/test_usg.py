@@ -217,6 +217,11 @@ endmodule
     )
     assert not any(edge.source is assign and edge.target is assign for edge in graph.data_edges)
 
+    facts = analyze_usg(graph)
+    self_use, input_use = facts.uses_of(assign)
+    assert facts.producers_of(assign, self_use) == (receive,)
+    assert facts.producers_of(assign, input_use) == ()
+
 
 def test_builder_builds_simple_if_assignment() -> None:
     block = _block("""\
@@ -477,6 +482,10 @@ endmodule
     assert [field.name for field in fields(AnalysisFacts)] == [
         "communication_predecessors",
         "incoming_communication_frontiers",
+        "definitions",
+        "uses",
+        "reaching_producers",
+        "uses_without_graph_local_producer",
     ]
     assert facts.predecessors_of(first) == ()
     assert facts.predecessors_of(second) == (first,)
@@ -569,6 +578,60 @@ def test_analysis_records_frontiers_for_straight_line_non_communication_nodes() 
     assert facts.incoming_frontier_of(assign) == (receive,)
     assert facts.incoming_frontier_of(send) == (receive,)
     assert facts.predecessors_of(send) == (receive,)
+
+
+def test_analysis_tracks_straight_line_definitions_uses_and_availability() -> None:
+    graph = build_straight_line_usg(_block(STRAIGHT_LINE_SOURCE))
+    receive, assign, send = graph.nodes
+
+    facts = analyze_usg(graph)
+    receive_definition = facts.definitions_of(receive)[0]
+    assign_definition = facts.definitions_of(assign)[0]
+    assign_uses = facts.uses_of(assign)
+    send_use = facts.uses_of(send)[0]
+
+    assert receive_definition.name == "a"
+    assert assign_definition.name == "t"
+    assert tuple(variable.name for variable in assign_uses) == ("a", "b")
+    assert send_use.name == "t"
+    assert facts.producers_of(assign, assign_uses[0]) == (receive,)
+    assert facts.producers_of(assign, assign_uses[1]) == ()
+    assert facts.producers_of(send, send_use) == (assign,)
+    assert facts.uses_without_graph_local_producer == ((assign, assign_uses[1]),)
+    assert receive_definition is receive.semantic_object.arguments[0].left.getSymbolReference()
+    assert assign_definition is assign.semantic_object.left.getSymbolReference()
+
+
+def test_analysis_merges_conditional_reaching_producers_for_a_later_use() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module conditional_availability(Channel B, input logic select, input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    if (select) x = a;
+    else x = a;
+    B.Send(x);
+  end
+endmodule
+"""))
+    predicate, true_assign, false_assign, send = graph.nodes
+
+    facts = analyze_usg(graph)
+    predicate_use = facts.uses_of(predicate)[0]
+    true_use = facts.uses_of(true_assign)[0]
+    false_use = facts.uses_of(false_assign)[0]
+    send_use = facts.uses_of(send)[0]
+
+    assert predicate_use.name == "select"
+    assert true_use.name == false_use.name == "a"
+    assert facts.producers_of(predicate, predicate_use) == ()
+    assert facts.producers_of(true_assign, true_use) == ()
+    assert facts.producers_of(false_assign, false_use) == ()
+    assert facts.producers_of(send, send_use) == (true_assign, false_assign)
+    assert facts.uses_without_graph_local_producer == (
+        (predicate, predicate_use),
+        (true_assign, true_use),
+        (false_assign, false_use),
+    )
 
 
 def test_analysis_records_predicate_and_join_frontiers() -> None:
