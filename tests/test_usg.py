@@ -1,7 +1,7 @@
 from dataclasses import fields
 
 import pytest
-from pyslang.ast import ProceduralBlockSymbol
+from pyslang.ast import CallExpression, GenerateBlockArraySymbol, ProceduralBlockSymbol
 
 from svcsp_compiler.semantic_frontend import parse_text
 from svcsp_compiler.usg import (
@@ -13,6 +13,7 @@ from svcsp_compiler.usg import (
     SendNode,
     USGBuilderError,
     UnifiedSemanticGraph,
+    build_process_usgs,
     build_straight_line_usg,
 )
 
@@ -27,9 +28,12 @@ module m(input logic a);
 endmodule
 """
 
+_SEMANTIC_CONTEXTS = []
+
 
 def _semantic_objects():
     context = parse_text(SOURCE, "usg.sv")
+    _SEMANTIC_CONTEXTS.append(context)
     module = context.root.topInstances[0].body
     visited = []
     module.visit(visited.append)
@@ -131,6 +135,7 @@ endmodule
 
 def _block(source: str):
     context = parse_text(source, "straight_line.sv")
+    _SEMANTIC_CONTEXTS.append(context)
     module = context.root.topInstances[0].body
     visited = []
     module.visit(visited.append)
@@ -405,6 +410,51 @@ endmodule
         DataEdge(true_assign, send),
     )
     assert graph.control_edges == (ControlEdge(predicate, true_assign, True),)
+
+
+def test_process_builder_enumerates_elaborated_generate_processes_independently() -> None:
+    context = parse_text(CONDITIONAL_SOURCE_PREFIX + """
+module generated_processes(Channel channels [0:2], input logic [7:0] data);
+  for (genvar g = 0; g < 3; g++) begin : generated_loop
+    always begin
+      channels[g].Send(data);
+    end
+  end
+endmodule
+""", "generated_processes.sv")
+    visited = []
+    context.root.visit(visited.append)
+    generate_array = next(
+        item for item in visited if isinstance(item, GenerateBlockArraySymbol)
+    )
+    expected_processes = []
+    expected_calls = []
+    for entry in generate_array.entries:
+        entry_items = []
+        entry.visit(entry_items.append)
+        expected_processes.append(
+            next(item for item in entry_items if isinstance(item, ProceduralBlockSymbol))
+        )
+        expected_calls.append(
+            next(item for item in entry_items if isinstance(item, CallExpression))
+        )
+
+    first = build_process_usgs(context.root)
+    second = build_process_usgs(context.root)
+
+    assert len(first) == len(expected_processes) == 3
+    assert [entry.arrayIndex for entry in generate_array.entries] == [0, 1, 2]
+    assert all(process is expected for (process, _), expected in zip(first, expected_processes))
+    assert all(process is expected for (process, _), expected in zip(second, expected_processes))
+    assert len({id(process) for process, _ in first}) == 3
+    assert len({id(graph) for _, graph in first}) == 3
+
+    for (_, graph), expected_call in zip(first, expected_calls):
+        assert len(graph.nodes) == 1
+        assert isinstance(graph.nodes[0], SendNode)
+        assert graph.nodes[0].semantic_object is expected_call
+        assert graph.data_edges == ()
+        assert graph.control_edges == ()
 
 
 @pytest.mark.parametrize(

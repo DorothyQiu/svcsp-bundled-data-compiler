@@ -13,7 +13,10 @@ from pyslang.ast import (
     Expression,
     ExpressionStatement,
     FormalArgumentSymbol,
+    GenerateBlockArraySymbol,
     NamedValueExpression,
+    ProceduralBlockSymbol,
+    RootSymbol,
     StatementBlockKind,
     StatementList,
     SubroutineKind,
@@ -137,6 +140,68 @@ def build_straight_line_usg(block: BlockStatement) -> UnifiedSemanticGraph:
     reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]] = []
     _build_statements(graph, _block_statements(block), reaching, ())
     return graph
+
+
+def build_process_usgs(
+    root: RootSymbol,
+) -> tuple[tuple[ProceduralBlockSymbol, UnifiedSemanticGraph], ...]:
+    """Build one independent USG for every elaborated native procedural block.
+
+    Result ordering follows native hierarchy traversal and generate-array entry
+    order for deterministic enumeration only; it is not a semantic ordering
+    relation between processes.
+    """
+
+    if not isinstance(root, RootSymbol):
+        raise USGBuilderError("expected a native RootSymbol")
+
+    items: list[object] = []
+    root.visit(items.append)
+    generated_processes = _generated_processes(items)
+    generated_ids = {id(process) for process in generated_processes}
+    processes: list[ProceduralBlockSymbol] = []
+    seen_ids: set[int] = set()
+
+    for item in items:
+        if isinstance(item, GenerateBlockArraySymbol):
+            for process in _processes_in_generate_array(item):
+                _append_process(processes, seen_ids, process)
+        elif isinstance(item, ProceduralBlockSymbol) and id(item) not in generated_ids:
+            _append_process(processes, seen_ids, item)
+
+    return tuple((process, build_straight_line_usg(process.body)) for process in processes)
+
+
+def _generated_processes(items: list[object]) -> tuple[ProceduralBlockSymbol, ...]:
+    processes: list[ProceduralBlockSymbol] = []
+    seen_ids: set[int] = set()
+    for item in items:
+        if isinstance(item, GenerateBlockArraySymbol):
+            for process in _processes_in_generate_array(item):
+                _append_process(processes, seen_ids, process)
+    return tuple(processes)
+
+
+def _processes_in_generate_array(
+    array: GenerateBlockArraySymbol,
+) -> tuple[ProceduralBlockSymbol, ...]:
+    processes: list[ProceduralBlockSymbol] = []
+    seen_ids: set[int] = set()
+    for entry in array.entries:
+        items: list[object] = []
+        entry.visit(items.append)
+        for item in items:
+            if isinstance(item, ProceduralBlockSymbol):
+                _append_process(processes, seen_ids, item)
+    return tuple(processes)
+
+
+def _append_process(
+    processes: list[ProceduralBlockSymbol], seen_ids: set[int], process: ProceduralBlockSymbol
+) -> None:
+    if id(process) not in seen_ids:
+        processes.append(process)
+        seen_ids.add(id(process))
 
 
 def _block_statements(block: BlockStatement) -> tuple[object, ...]:

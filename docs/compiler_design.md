@@ -231,6 +231,11 @@ In particular:
 - `UnifiedSemanticGraph.nodes` preserves builder source or expanded semantic-occurrence order; this does not add an ORDER edge.
 - Source semantic identity must remain recoverable from USG nodes.
 
+One USG is built independently for each native `ProceduralBlockSymbol`.
+Elaborated generate instances are discovered through the pyslang semantic
+hierarchy; the compiler does not manually expand generate syntax. Generated
+procedures are concurrent processes and have no cross-process semantic order.
+
 ---
 
 ## 6. Assignment and Value Semantics

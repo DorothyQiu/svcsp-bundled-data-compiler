@@ -121,6 +121,10 @@ Required invariants include:
   value-version representation;
 - communication source ordering is preserved separately from DATA dependence;
 - `UnifiedSemanticGraph.nodes` preserves builder source or expanded semantic-occurrence order without fabricating a DATA edge;
+- one USG is built independently for each native `ProceduralBlockSymbol`;
+- elaborated generate instances are discovered through pyslang hierarchy rather
+  than compiler-side generate-syntax expansion;
+- generated procedures remain concurrent, with no cross-process semantic order;
 - `x = x + a` does not create an artificial Assign self-loop;
 - graph construction does not introduce stage boundaries;
 - graph construction does not bind asynchronous templates;
