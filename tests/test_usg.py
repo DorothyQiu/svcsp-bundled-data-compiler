@@ -487,6 +487,7 @@ endmodule
         "reaching_producers",
         "uses_without_graph_local_producer",
         "value_uses",
+        "definition_consumers",
     ]
     assert facts.predecessors_of(first) == ()
     assert facts.predecessors_of(second) == (first,)
@@ -601,6 +602,8 @@ def test_analysis_tracks_straight_line_definitions_uses_and_availability() -> No
     assert facts.uses_without_graph_local_producer == ((assign, assign_uses[1]),)
     assert receive_definition is receive.semantic_object.arguments[0].left.getSymbolReference()
     assert assign_definition is assign.semantic_object.left.getSymbolReference()
+    assert facts.consumers_of(receive) == (facts.value_use_of(assign, assign_uses[0]),)
+    assert facts.consumers_of(assign) == (facts.value_use_of(send, send_use),)
 
 
 def test_analysis_merges_conditional_reaching_producers_for_a_later_use() -> None:
@@ -633,6 +636,8 @@ endmodule
         (true_assign, true_use),
         (false_assign, false_use),
     )
+    assert facts.consumers_of(true_assign) == (facts.value_use_of(send, send_use),)
+    assert facts.consumers_of(false_assign) == (facts.value_use_of(send, send_use),)
 
 
 def test_analysis_classifies_single_statement_module_input_as_port_entry() -> None:
@@ -675,24 +680,27 @@ endmodule
 
 
 def test_analysis_classifies_self_assignment_rhs_before_its_new_definition() -> None:
-    graph = build_straight_line_usg(_block("""\
-module self_entry(input logic [7:0] a);
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module self_entry(Channel B, input logic [7:0] a);
   logic [7:0] x;
   always begin
     x = x + a;
+    B.Send(x);
   end
 endmodule
 """))
-    (assign,) = graph.nodes
+    assign, send = graph.nodes
 
     facts = analyze_usg(graph)
     x_symbol, input_symbol = facts.uses_of(assign)
+    (sent_x,) = facts.uses_of(send)
 
     assert x_symbol.name == "x"
     assert facts.value_use_of(assign, x_symbol).origin is ValueOrigin.LOCAL_ENTRY
     assert facts.value_use_of(assign, x_symbol).reaching_producers == ()
     assert facts.value_use_of(assign, input_symbol).origin is ValueOrigin.PORT_ENTRY
     assert facts.definitions_of(assign) == (x_symbol,)
+    assert facts.consumers_of(assign) == (facts.value_use_of(send, sent_x),)
 
 
 def test_analysis_classifies_parameter_and_localparam_uses() -> None:
@@ -739,6 +747,8 @@ endmodule
     assert received_symbol is facts.definitions_of(receive)[0]
     assert value_use.origin is ValueOrigin.GRAPH_LOCAL
     assert value_use.reaching_producers == (receive,)
+    assert facts.consumers_of(receive) == (value_use,)
+    assert facts.consumers_of(assign) == ()
 
 
 def test_analysis_records_predicate_and_join_frontiers() -> None:

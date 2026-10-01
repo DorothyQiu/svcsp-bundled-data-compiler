@@ -66,6 +66,7 @@ class AnalysisFacts:
     ]
     uses_without_graph_local_producer: tuple[tuple[USGNode, SemanticValueSymbol], ...]
     value_uses: tuple[ValueUse, ...]
+    definition_consumers: tuple[tuple[DefinitionNode, tuple[ValueUse, ...]], ...]
 
     def predecessors_of(self, communication: CommunicationNode) -> tuple[CommunicationNode, ...]:
         """Return the possible preceding communications for ``communication``."""
@@ -121,6 +122,14 @@ class AnalysisFacts:
                 return value_use
         raise KeyError("semantic value is not used by this node in these analysis facts")
 
+    def consumers_of(self, definition: DefinitionNode) -> tuple[ValueUse, ...]:
+        """Return semantic uses that may consume this exact reaching definition."""
+
+        for known, consumers in self.definition_consumers:
+            if known is definition:
+                return consumers
+        raise KeyError("definition node is not present in these analysis facts")
+
 
 class USGAnalysisError(ValueError):
     """USG occurrence/control structure cannot be analyzed as structured paths."""
@@ -143,6 +152,10 @@ def analyze_usg(graph: UnifiedSemanticGraph) -> AnalysisFacts:
         tuple(analyzer.reaching_producers),
         tuple(analyzer.uses_without_graph_local_producer),
         tuple(analyzer.value_uses),
+        tuple(
+            (definition, tuple(consumers))
+            for definition, consumers in analyzer.definition_consumers
+        ),
     )
 
 
@@ -188,6 +201,7 @@ class _OccurrenceAnalyzer:
         ] = []
         self.uses_without_graph_local_producer: list[tuple[USGNode, SemanticValueSymbol]] = []
         self.value_uses: list[ValueUse] = []
+        self.definition_consumers: list[tuple[DefinitionNode, list[ValueUse]]] = []
 
     def visit_region(
         self,
@@ -245,17 +259,30 @@ class _OccurrenceAnalyzer:
         for symbol in uses:
             producers = _reaching_definitions(reaching, symbol) if isinstance(symbol, VariableSymbol) else ()
             origin = _value_origin(symbol, producers)
-            self.value_uses.append(ValueUse(node, symbol, origin, producers))
+            value_use = ValueUse(node, symbol, origin, producers)
+            self.value_uses.append(value_use)
             if not producers:
                 self.uses_without_graph_local_producer.append((node, symbol))
             if isinstance(symbol, VariableSymbol):
                 self.reaching_producers.append((node, symbol, producers))
+            for producer in producers:
+                self._record_definition_consumer(producer, value_use)
 
         definitions = _node_definitions(node)
         if isinstance(node, (ReceiveNode, AssignNode)):
             self.definitions.append((node, definitions))
+            self.definition_consumers.append((node, []))
         for variable in definitions:
             _set_reaching_definition(reaching, variable, node)
+
+    def _record_definition_consumer(
+        self, definition: DefinitionNode, value_use: ValueUse
+    ) -> None:
+        for known, consumers in self.definition_consumers:
+            if known is definition:
+                consumers.append(value_use)
+                return
+        raise USGAnalysisError("reaching definition was not recorded in this graph")
 
 
 def _has_prefix(path: _ControlPath, prefix: _ControlPath) -> bool:
