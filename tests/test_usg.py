@@ -1,10 +1,10 @@
 from dataclasses import fields
 
 import pytest
-from pyslang.ast import CallExpression, GenerateBlockArraySymbol, ProceduralBlockSymbol
+from pyslang.ast import CallExpression, GenerateBlockArraySymbol, ParameterSymbol, ProceduralBlockSymbol
 
 from svcsp_compiler.semantic_frontend import parse_text
-from svcsp_compiler.analysis import AnalysisFacts, analyze_usg
+from svcsp_compiler.analysis import AnalysisFacts, ValueOrigin, analyze_usg
 from svcsp_compiler.usg import (
     AssignNode,
     ControlEdge,
@@ -486,6 +486,7 @@ endmodule
         "uses",
         "reaching_producers",
         "uses_without_graph_local_producer",
+        "value_uses",
     ]
     assert facts.predecessors_of(first) == ()
     assert facts.predecessors_of(second) == (first,)
@@ -632,6 +633,112 @@ endmodule
         (true_assign, true_use),
         (false_assign, false_use),
     )
+
+
+def test_analysis_classifies_single_statement_module_input_as_port_entry() -> None:
+    graph = build_straight_line_usg(_block("""\
+module port_entry(input logic [7:0] a);
+  logic [7:0] y;
+  always y = a;
+endmodule
+"""))
+    (assign,) = graph.nodes
+
+    facts = analyze_usg(graph)
+    (input_symbol,) = facts.uses_of(assign)
+    value_use = facts.value_use_of(assign, input_symbol)
+
+    assert input_symbol.name == "a"
+    assert value_use.symbol is input_symbol
+    assert value_use.origin is ValueOrigin.PORT_ENTRY
+    assert value_use.reaching_producers == ()
+
+
+def test_analysis_classifies_local_read_before_definition_as_local_entry() -> None:
+    graph = build_straight_line_usg(_block("""\
+module local_entry;
+  logic [7:0] x, y;
+  always begin
+    y = x;
+  end
+endmodule
+"""))
+    (assign,) = graph.nodes
+
+    facts = analyze_usg(graph)
+    (local_symbol,) = facts.uses_of(assign)
+    value_use = facts.value_use_of(assign, local_symbol)
+
+    assert local_symbol.name == "x"
+    assert value_use.origin is ValueOrigin.LOCAL_ENTRY
+    assert value_use.reaching_producers == ()
+
+
+def test_analysis_classifies_self_assignment_rhs_before_its_new_definition() -> None:
+    graph = build_straight_line_usg(_block("""\
+module self_entry(input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    x = x + a;
+  end
+endmodule
+"""))
+    (assign,) = graph.nodes
+
+    facts = analyze_usg(graph)
+    x_symbol, input_symbol = facts.uses_of(assign)
+
+    assert x_symbol.name == "x"
+    assert facts.value_use_of(assign, x_symbol).origin is ValueOrigin.LOCAL_ENTRY
+    assert facts.value_use_of(assign, x_symbol).reaching_producers == ()
+    assert facts.value_use_of(assign, input_symbol).origin is ValueOrigin.PORT_ENTRY
+    assert facts.definitions_of(assign) == (x_symbol,)
+
+
+def test_analysis_classifies_parameter_and_localparam_uses() -> None:
+    graph = build_straight_line_usg(_block("""\
+module parameter_values #(parameter int P = 3) ();
+  localparam int LP = 2;
+  logic [7:0] y;
+  always begin
+    y = P + LP;
+  end
+endmodule
+"""))
+    (assign,) = graph.nodes
+
+    facts = analyze_usg(graph)
+    parameter, localparam = facts.uses_of(assign)
+
+    assert isinstance(parameter, ParameterSymbol)
+    assert isinstance(localparam, ParameterSymbol)
+    assert (parameter.name, localparam.name) == ("P", "LP")
+    assert facts.value_use_of(assign, parameter).origin is ValueOrigin.PARAMETER
+    assert facts.value_use_of(assign, localparam).origin is ValueOrigin.PARAMETER
+    assert facts.producers_of(assign, parameter) == ()
+    assert facts.producers_of(assign, localparam) == ()
+    assert facts.uses_without_graph_local_producer == ((assign, parameter), (assign, localparam))
+
+
+def test_analysis_classifies_receive_defined_value_as_graph_local() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module receive_value(Channel A);
+  logic [7:0] x, y;
+  always begin
+    A.Receive(x);
+    y = x;
+  end
+endmodule
+"""))
+    receive, assign = graph.nodes
+
+    facts = analyze_usg(graph)
+    (received_symbol,) = facts.uses_of(assign)
+    value_use = facts.value_use_of(assign, received_symbol)
+
+    assert received_symbol is facts.definitions_of(receive)[0]
+    assert value_use.origin is ValueOrigin.GRAPH_LOCAL
+    assert value_use.reaching_producers == (receive,)
 
 
 def test_analysis_records_predicate_and_join_frontiers() -> None:

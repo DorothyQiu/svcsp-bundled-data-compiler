@@ -128,17 +128,12 @@ class UnifiedSemanticGraph:
         return any(existing is node for existing in self._nodes)
 
 
-def build_straight_line_usg(block: BlockStatement) -> UnifiedSemanticGraph:
-    """Build a sequential block, including simple if / else branch occurrences."""
-
-    if not isinstance(block, BlockStatement):
-        raise USGBuilderError("unsupported executable statement: expected a native BlockStatement")
-    if block.blockKind is not StatementBlockKind.Sequential:
-        raise USGBuilderError("only sequential BlockStatement traversal is supported")
+def build_straight_line_usg(body: object) -> UnifiedSemanticGraph:
+    """Build a sequential block or one supported executable statement occurrence."""
 
     graph = UnifiedSemanticGraph()
     reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]] = []
-    _build_statements(graph, _block_statements(block), reaching, ())
+    _build_branch(graph, body, reaching, ())
     return graph
 
 

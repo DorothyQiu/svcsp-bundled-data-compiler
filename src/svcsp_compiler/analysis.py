@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from pyslang.ast import (
     AssignmentExpression,
     CallExpression,
     Expression,
     NamedValueExpression,
+    ParameterSymbol,
     VariableSymbol,
 )
+from pyslang.syntax import ImplicitAnsiPortSyntax
 
 from .usg import (
     AssignNode,
@@ -24,8 +27,28 @@ from .usg import (
 
 CommunicationNode = ReceiveNode | SendNode
 DefinitionNode = ReceiveNode | AssignNode
+SemanticValueSymbol = VariableSymbol | ParameterSymbol
 _ControlPath = tuple[tuple[PredicateNode, bool], ...]
 _ReachingDefinitions = list[tuple[VariableSymbol, tuple[DefinitionNode, ...]]]
+
+
+class ValueOrigin(str, Enum):
+    """Semantic origin of a value at a specific use occurrence."""
+
+    GRAPH_LOCAL = "graph-local"
+    PORT_ENTRY = "port-entry"
+    LOCAL_ENTRY = "local-entry"
+    PARAMETER = "parameter"
+
+
+@dataclass(frozen=True, slots=True)
+class ValueUse:
+    """One native semantic value use and its graph-local availability."""
+
+    node: USGNode
+    symbol: SemanticValueSymbol
+    origin: ValueOrigin
+    reaching_producers: tuple[DefinitionNode, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,11 +60,12 @@ class AnalysisFacts:
         tuple[USGNode, tuple[CommunicationNode, ...]], ...
     ]
     definitions: tuple[tuple[DefinitionNode, tuple[VariableSymbol, ...]], ...]
-    uses: tuple[tuple[USGNode, tuple[VariableSymbol, ...]], ...]
+    uses: tuple[tuple[USGNode, tuple[SemanticValueSymbol, ...]], ...]
     reaching_producers: tuple[
         tuple[USGNode, VariableSymbol, tuple[DefinitionNode, ...]], ...
     ]
-    uses_without_graph_local_producer: tuple[tuple[USGNode, VariableSymbol], ...]
+    uses_without_graph_local_producer: tuple[tuple[USGNode, SemanticValueSymbol], ...]
+    value_uses: tuple[ValueUse, ...]
 
     def predecessors_of(self, communication: CommunicationNode) -> tuple[CommunicationNode, ...]:
         """Return the possible preceding communications for ``communication``."""
@@ -67,7 +91,7 @@ class AnalysisFacts:
                 return definitions
         raise KeyError("definition node is not present in these analysis facts")
 
-    def uses_of(self, node: USGNode) -> tuple[VariableSymbol, ...]:
+    def uses_of(self, node: USGNode) -> tuple[SemanticValueSymbol, ...]:
         """Return variables read by an Assign, Predicate, or Send occurrence."""
 
         for known, uses in self.uses:
@@ -76,14 +100,26 @@ class AnalysisFacts:
         raise KeyError("use node is not present in these analysis facts")
 
     def producers_of(
-        self, node: USGNode, variable: VariableSymbol
+        self, node: USGNode, variable: SemanticValueSymbol
     ) -> tuple[DefinitionNode, ...]:
         """Return graph-local definitions reaching one native variable use."""
 
         for known, used_variable, producers in self.reaching_producers:
             if known is node and used_variable is variable:
                 return producers
+        if isinstance(variable, ParameterSymbol):
+            for value_use in self.value_uses:
+                if value_use.node is node and value_use.symbol is variable:
+                    return ()
         raise KeyError("variable is not used by this node in these analysis facts")
+
+    def value_use_of(self, node: USGNode, symbol: SemanticValueSymbol) -> ValueUse:
+        """Return the origin and reaching producers for one native semantic use."""
+
+        for value_use in self.value_uses:
+            if value_use.node is node and value_use.symbol is symbol:
+                return value_use
+        raise KeyError("semantic value is not used by this node in these analysis facts")
 
 
 class USGAnalysisError(ValueError):
@@ -106,6 +142,7 @@ def analyze_usg(graph: UnifiedSemanticGraph) -> AnalysisFacts:
         tuple(analyzer.uses),
         tuple(analyzer.reaching_producers),
         tuple(analyzer.uses_without_graph_local_producer),
+        tuple(analyzer.value_uses),
     )
 
 
@@ -145,11 +182,12 @@ class _OccurrenceAnalyzer:
             tuple[USGNode, tuple[CommunicationNode, ...]]
         ] = []
         self.definitions: list[tuple[DefinitionNode, tuple[VariableSymbol, ...]]] = []
-        self.uses: list[tuple[USGNode, tuple[VariableSymbol, ...]]] = []
+        self.uses: list[tuple[USGNode, tuple[SemanticValueSymbol, ...]]] = []
         self.reaching_producers: list[
             tuple[USGNode, VariableSymbol, tuple[DefinitionNode, ...]]
         ] = []
-        self.uses_without_graph_local_producer: list[tuple[USGNode, VariableSymbol]] = []
+        self.uses_without_graph_local_producer: list[tuple[USGNode, SemanticValueSymbol]] = []
+        self.value_uses: list[ValueUse] = []
 
     def visit_region(
         self,
@@ -204,11 +242,14 @@ class _OccurrenceAnalyzer:
         uses = _node_uses(node)
         if isinstance(node, (AssignNode, PredicateNode, SendNode)):
             self.uses.append((node, uses))
-        for variable in uses:
-            producers = _reaching_definitions(reaching, variable)
-            self.reaching_producers.append((node, variable, producers))
+        for symbol in uses:
+            producers = _reaching_definitions(reaching, symbol) if isinstance(symbol, VariableSymbol) else ()
+            origin = _value_origin(symbol, producers)
+            self.value_uses.append(ValueUse(node, symbol, origin, producers))
             if not producers:
-                self.uses_without_graph_local_producer.append((node, variable))
+                self.uses_without_graph_local_producer.append((node, symbol))
+            if isinstance(symbol, VariableSymbol):
+                self.reaching_producers.append((node, symbol, producers))
 
         definitions = _node_definitions(node)
         if isinstance(node, (ReceiveNode, AssignNode)):
@@ -252,7 +293,7 @@ def _node_definitions(node: USGNode) -> tuple[VariableSymbol, ...]:
     return ()
 
 
-def _node_uses(node: USGNode) -> tuple[VariableSymbol, ...]:
+def _node_uses(node: USGNode) -> tuple[SemanticValueSymbol, ...]:
     if isinstance(node, AssignNode):
         assignment = node.semantic_object
         if not isinstance(assignment, AssignmentExpression):
@@ -279,18 +320,32 @@ def _lvalue_variable(expression: Expression) -> VariableSymbol:
     return symbol
 
 
-def _expression_variables(expression: Expression) -> tuple[VariableSymbol, ...]:
-    variables: list[VariableSymbol] = []
+def _expression_variables(expression: Expression) -> tuple[SemanticValueSymbol, ...]:
+    values: list[SemanticValueSymbol] = []
 
     def visit(item: object) -> None:
         if not isinstance(item, NamedValueExpression):
             return
         symbol = item.getSymbolReference()
-        if isinstance(symbol, VariableSymbol) and not any(symbol is known for known in variables):
-            variables.append(symbol)
+        if not isinstance(symbol, (VariableSymbol, ParameterSymbol)):
+            raise USGAnalysisError("expression reference is not a VariableSymbol or ParameterSymbol")
+        if not any(symbol is known for known in values):
+            values.append(symbol)
 
     expression.visit(visit)
-    return tuple(variables)
+    return tuple(values)
+
+
+def _value_origin(
+    symbol: SemanticValueSymbol, producers: tuple[DefinitionNode, ...]
+) -> ValueOrigin:
+    if producers:
+        return ValueOrigin.GRAPH_LOCAL
+    if isinstance(symbol, ParameterSymbol):
+        return ValueOrigin.PARAMETER
+    if isinstance(symbol.syntax.parent, ImplicitAnsiPortSyntax):
+        return ValueOrigin.PORT_ENTRY
+    return ValueOrigin.LOCAL_ENTRY
 
 
 def _reaching_definitions(
