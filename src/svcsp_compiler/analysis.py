@@ -22,6 +22,9 @@ class AnalysisFacts:
     """Read-only facts collected during one USG occurrence-order traversal."""
 
     communication_predecessors: tuple[tuple[CommunicationNode, tuple[CommunicationNode, ...]], ...]
+    incoming_communication_frontiers: tuple[
+        tuple[USGNode, tuple[CommunicationNode, ...]], ...
+    ]
 
     def predecessors_of(self, communication: CommunicationNode) -> tuple[CommunicationNode, ...]:
         """Return the possible preceding communications for ``communication``."""
@@ -30,6 +33,14 @@ class AnalysisFacts:
             if known is communication:
                 return predecessors
         raise KeyError("communication node is not present in these analysis facts")
+
+    def incoming_frontier_of(self, node: USGNode) -> tuple[CommunicationNode, ...]:
+        """Return possible immediately preceding communications before ``node``."""
+
+        for known, frontier in self.incoming_communication_frontiers:
+            if known is node:
+                return frontier
+        raise KeyError("USG node is not present in these analysis facts")
 
 
 class USGAnalysisError(ValueError):
@@ -45,7 +56,10 @@ def analyze_usg(graph: UnifiedSemanticGraph) -> AnalysisFacts:
     end_index, _ = analyzer.visit_region(0, (), ())
     if end_index != len(nodes) or len(analyzer.consumed_ids) != len(nodes):
         raise USGAnalysisError("USG occurrence traversal did not consume every node once")
-    return AnalysisFacts(tuple(analyzer.communication_predecessors))
+    return AnalysisFacts(
+        tuple(analyzer.communication_predecessors),
+        tuple(analyzer.incoming_communication_frontiers),
+    )
 
 
 def _control_paths(
@@ -80,6 +94,9 @@ class _OccurrenceAnalyzer:
         self.communication_predecessors: list[
             tuple[CommunicationNode, tuple[CommunicationNode, ...]]
         ] = []
+        self.incoming_communication_frontiers: list[
+            tuple[USGNode, tuple[CommunicationNode, ...]]
+        ] = []
 
     def visit_region(
         self,
@@ -97,6 +114,7 @@ class _OccurrenceAnalyzer:
             if path != active_path:
                 raise USGAnalysisError("CONTROL paths do not match structured occurrence order")
 
+            self.incoming_communication_frontiers.append((node, frontier))
             self._consume(node)
             if isinstance(node, PredicateNode):
                 true_path = active_path + ((node, True),)

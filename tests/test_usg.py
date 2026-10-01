@@ -474,10 +474,16 @@ endmodule
     facts = analyze_usg(graph)
     first, second, third = graph.nodes
 
-    assert [field.name for field in fields(AnalysisFacts)] == ["communication_predecessors"]
+    assert [field.name for field in fields(AnalysisFacts)] == [
+        "communication_predecessors",
+        "incoming_communication_frontiers",
+    ]
     assert facts.predecessors_of(first) == ()
     assert facts.predecessors_of(second) == (first,)
     assert facts.predecessors_of(third) == (second,)
+    assert facts.incoming_frontier_of(first) == ()
+    assert facts.incoming_frontier_of(second) == (first,)
+    assert facts.incoming_frontier_of(third) == (second,)
     assert (graph.nodes, graph.data_edges, graph.control_edges) == before
 
 
@@ -551,6 +557,46 @@ endmodule
     assert facts.predecessors_of(receive_c) == (receive_a,)
     assert facts.predecessors_of(receive_d) == (receive_a,)
     assert facts.predecessors_of(send) == (receive_b, receive_c, receive_d)
+
+
+def test_analysis_records_frontiers_for_straight_line_non_communication_nodes() -> None:
+    graph = build_straight_line_usg(_block(STRAIGHT_LINE_SOURCE))
+
+    facts = analyze_usg(graph)
+    receive, assign, send = graph.nodes
+
+    assert facts.incoming_frontier_of(receive) == ()
+    assert facts.incoming_frontier_of(assign) == (receive,)
+    assert facts.incoming_frontier_of(send) == (receive,)
+    assert facts.predecessors_of(send) == (receive,)
+
+
+def test_analysis_records_predicate_and_join_frontiers() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module join_frontiers(Channel A, B, C, D);
+  logic [7:0] a, b, c;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin
+      B.Receive(b);
+    end
+    else begin
+      C.Receive(c);
+    end
+    D.Send(a);
+  end
+endmodule
+"""))
+
+    facts = analyze_usg(graph)
+    receive_a, predicate, receive_b, receive_c, send = graph.nodes
+
+    assert facts.incoming_frontier_of(receive_a) == ()
+    assert facts.incoming_frontier_of(predicate) == (receive_a,)
+    assert facts.incoming_frontier_of(receive_b) == (receive_a,)
+    assert facts.incoming_frontier_of(receive_c) == (receive_a,)
+    assert facts.incoming_frontier_of(send) == (receive_b, receive_c)
+    assert facts.predecessors_of(send) == (receive_b, receive_c)
 
 
 @pytest.mark.parametrize(
