@@ -4,6 +4,7 @@ import pytest
 from pyslang.ast import CallExpression, GenerateBlockArraySymbol, ProceduralBlockSymbol
 
 from svcsp_compiler.semantic_frontend import parse_text
+from svcsp_compiler.analysis import AnalysisFacts, analyze_usg
 from svcsp_compiler.usg import (
     AssignNode,
     ControlEdge,
@@ -455,6 +456,101 @@ endmodule
         assert graph.nodes[0].semantic_object is expected_call
         assert graph.data_edges == ()
         assert graph.control_edges == ()
+
+
+def test_analysis_tracks_straight_line_communication_predecessors_read_only() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module straight_analysis(Channel A, B, C);
+  logic [7:0] a, b;
+  always begin
+    A.Receive(a);
+    B.Receive(b);
+    C.Send(a);
+  end
+endmodule
+"""))
+    before = (graph.nodes, graph.data_edges, graph.control_edges)
+
+    facts = analyze_usg(graph)
+    first, second, third = graph.nodes
+
+    assert [field.name for field in fields(AnalysisFacts)] == ["communication_predecessors"]
+    assert facts.predecessors_of(first) == ()
+    assert facts.predecessors_of(second) == (first,)
+    assert facts.predecessors_of(third) == (second,)
+    assert (graph.nodes, graph.data_edges, graph.control_edges) == before
+
+
+def test_analysis_merges_simple_if_communication_frontiers() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module simple_if_analysis(Channel A, B, C);
+  logic [7:0] a, b;
+  always begin
+    A.Receive(a);
+    if (a[0]) B.Receive(b);
+    C.Send(a);
+  end
+endmodule
+"""))
+
+    facts = analyze_usg(graph)
+    receive_a, _, receive_b, send = graph.nodes
+
+    assert facts.predecessors_of(receive_a) == ()
+    assert facts.predecessors_of(receive_b) == (receive_a,)
+    assert facts.predecessors_of(send) == (receive_a, receive_b)
+
+
+def test_analysis_merges_if_else_communication_frontiers() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module if_else_analysis(Channel A, B, C, D);
+  logic [7:0] a, b, c;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin
+      B.Receive(b);
+    end
+    else begin
+      C.Receive(c);
+    end
+    D.Send(a);
+  end
+endmodule
+"""))
+
+    facts = analyze_usg(graph)
+    receive_a, _, receive_b, receive_c, send = graph.nodes
+
+    assert facts.predecessors_of(receive_a) == ()
+    assert facts.predecessors_of(receive_b) == (receive_a,)
+    assert facts.predecessors_of(receive_c) == (receive_a,)
+    assert facts.predecessors_of(send) == (receive_b, receive_c)
+
+
+def test_analysis_merges_nested_conditional_communication_frontiers() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module nested_analysis(Channel A, B, C, D, E);
+  logic [7:0] a, b, c, d;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin
+      if (a[1]) B.Receive(b);
+      else C.Receive(c);
+    end
+    else D.Receive(d);
+    E.Send(a);
+  end
+endmodule
+"""))
+
+    facts = analyze_usg(graph)
+    receive_a, _, _, receive_b, receive_c, receive_d, send = graph.nodes
+
+    assert facts.predecessors_of(receive_a) == ()
+    assert facts.predecessors_of(receive_b) == (receive_a,)
+    assert facts.predecessors_of(receive_c) == (receive_a,)
+    assert facts.predecessors_of(receive_d) == (receive_a,)
+    assert facts.predecessors_of(send) == (receive_b, receive_c, receive_d)
 
 
 @pytest.mark.parametrize(
