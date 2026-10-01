@@ -9,6 +9,7 @@ from pyslang.ast import (
     AssignmentExpression,
     BlockStatement,
     CallExpression,
+    ConditionalStatement,
     Expression,
     ExpressionStatement,
     FormalArgumentSymbol,
@@ -54,6 +55,7 @@ class DataEdge:
 class ControlEdge:
     source: USGNode
     target: USGNode
+    polarity: bool
 
 
 USGEdge: TypeAlias = DataEdge | ControlEdge
@@ -112,15 +114,19 @@ class UnifiedSemanticGraph:
     def add_data_edge(self, source: USGNode, target: USGNode) -> DataEdge:
         return self.add_edge(DataEdge(source, target))
 
-    def add_control_edge(self, source: USGNode, target: USGNode) -> ControlEdge:
-        return self.add_edge(ControlEdge(source, target))
+    def add_control_edge(
+        self, source: USGNode, target: USGNode, polarity: bool
+    ) -> ControlEdge:
+        if not isinstance(polarity, bool):
+            raise TypeError("control edge polarity must be a bool")
+        return self.add_edge(ControlEdge(source, target, polarity))
 
     def _contains(self, node: USGNode) -> bool:
         return any(existing is node for existing in self._nodes)
 
 
 def build_straight_line_usg(block: BlockStatement) -> UnifiedSemanticGraph:
-    """Build nodes and DATA flow in sequential source / expanded occurrence order."""
+    """Build a sequential block, including simple if / else branch occurrences."""
 
     if not isinstance(block, BlockStatement):
         raise USGBuilderError("unsupported executable statement: expected a native BlockStatement")
@@ -128,9 +134,27 @@ def build_straight_line_usg(block: BlockStatement) -> UnifiedSemanticGraph:
         raise USGBuilderError("only sequential BlockStatement traversal is supported")
 
     graph = UnifiedSemanticGraph()
-    latest: list[tuple[VariableSymbol, USGNode]] = []
-    statements = block.body.list if isinstance(block.body, StatementList) else (block.body,)
+    reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]] = []
+    _build_statements(graph, _block_statements(block), reaching, ())
+    return graph
+
+
+def _block_statements(block: BlockStatement) -> tuple[object, ...]:
+    if block.blockKind is not StatementBlockKind.Sequential:
+        raise USGBuilderError("only sequential BlockStatement traversal is supported")
+    return block.body.list if isinstance(block.body, StatementList) else (block.body,)
+
+
+def _build_statements(
+    graph: UnifiedSemanticGraph,
+    statements: tuple[object, ...],
+    reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]],
+    controls: tuple[tuple[PredicateNode, bool], ...],
+) -> None:
     for statement in statements:
+        if isinstance(statement, ConditionalStatement):
+            _build_conditional(graph, statement, reaching, controls)
+            continue
         if not isinstance(statement, ExpressionStatement):
             raise USGBuilderError(
                 f"unsupported executable statement: {type(statement).__name__}"
@@ -147,12 +171,55 @@ def build_straight_line_usg(block: BlockStatement) -> UnifiedSemanticGraph:
 
         graph.add_node(node)
         for variable in uses:
-            source = _latest_definition(latest, variable)
-            if source is not None:
+            for source in _reaching_definitions(reaching, variable):
                 graph.add_data_edge(source, node)
+        for predicate, polarity in controls:
+            graph.add_control_edge(predicate, node, polarity)
         for variable in definitions:
-            _set_latest_definition(latest, variable, node)
-    return graph
+            _set_reaching_definition(reaching, variable, node)
+
+
+def _build_conditional(
+    graph: UnifiedSemanticGraph,
+    statement: ConditionalStatement,
+    reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]],
+    controls: tuple[tuple[PredicateNode, bool], ...],
+) -> None:
+    if len(statement.conditions) != 1 or statement.conditions[0].pattern is not None:
+        raise USGBuilderError("unsupported conditional form")
+
+    predicate = PredicateNode(statement.conditions[0].expr)
+    graph.add_node(predicate)
+    for variable in _expression_variables(statement.conditions[0].expr):
+        for source in _reaching_definitions(reaching, variable):
+            graph.add_data_edge(source, predicate)
+    for controlling_predicate, polarity in controls:
+        graph.add_control_edge(controlling_predicate, predicate, polarity)
+
+    true_reaching = reaching.copy()
+    _build_branch(
+        graph, statement.ifTrue, true_reaching, controls + ((predicate, True),)
+    )
+    if statement.ifFalse is not None:
+        false_reaching = reaching.copy()
+        _build_branch(
+            graph, statement.ifFalse, false_reaching, controls + ((predicate, False),)
+        )
+        reaching[:] = _merge_reaching_definitions(true_reaching, false_reaching)
+    else:
+        reaching[:] = _merge_reaching_definitions(reaching, true_reaching)
+
+
+def _build_branch(
+    graph: UnifiedSemanticGraph,
+    statement: object,
+    reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]],
+    controls: tuple[tuple[PredicateNode, bool], ...],
+) -> None:
+    if isinstance(statement, BlockStatement):
+        _build_statements(graph, _block_statements(statement), reaching, controls)
+        return
+    _build_statements(graph, (statement,), reaching, controls)
 
 
 def _build_call_node(
@@ -217,20 +284,43 @@ def _expression_variables(expression: Expression) -> tuple[VariableSymbol, ...]:
     return tuple(variables)
 
 
-def _latest_definition(
-    latest: list[tuple[VariableSymbol, USGNode]], variable: VariableSymbol
-) -> USGNode | None:
-    for known, node in latest:
+def _reaching_definitions(
+    reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]], variable: VariableSymbol
+) -> tuple[USGNode, ...]:
+    for known, nodes in reaching:
         if known is variable:
-            return node
-    return None
+            return nodes
+    return ()
 
 
-def _set_latest_definition(
-    latest: list[tuple[VariableSymbol, USGNode]], variable: VariableSymbol, node: USGNode
+def _set_reaching_definition(
+    reaching: list[tuple[VariableSymbol, tuple[USGNode, ...]]],
+    variable: VariableSymbol,
+    node: USGNode,
 ) -> None:
-    for index, (known, _) in enumerate(latest):
+    for index, (known, _) in enumerate(reaching):
         if known is variable:
-            latest[index] = (variable, node)
+            reaching[index] = (variable, (node,))
             return
-    latest.append((variable, node))
+    reaching.append((variable, (node,)))
+
+
+def _merge_reaching_definitions(
+    *environments: list[tuple[VariableSymbol, tuple[USGNode, ...]]],
+) -> list[tuple[VariableSymbol, tuple[USGNode, ...]]]:
+    merged: list[tuple[VariableSymbol, list[USGNode]]] = []
+    for environment in environments:
+        for variable, nodes in environment:
+            for index, (known, known_nodes) in enumerate(merged):
+                if known is variable:
+                    for node in nodes:
+                        if not any(node is existing for existing in known_nodes):
+                            known_nodes.append(node)
+                    break
+            else:
+                merged.append((variable, list(nodes)))
+
+    return [
+        (variable, tuple(nodes))
+        for variable, nodes in merged
+    ]

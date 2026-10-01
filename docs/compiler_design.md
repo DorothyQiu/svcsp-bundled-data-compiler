@@ -213,6 +213,10 @@ if (t)
 
 contains a CONTROL relation from the predicate to the Send operation.
 
+Each CONTROL edge records whether it applies to the predicate's true or false
+branch. This polarity describes source control semantics only; it does not imply
+a particular control implementation.
+
 ### 5.3 USG Invariants
 
 The USG must describe semantic dependencies, not physical hardware topology.
@@ -262,6 +266,11 @@ in the USG.
 The graph builder must preserve sufficient source ordering and definition/use information for later analysis to distinguish the consumed and produced values.
 
 A future implementation may introduce explicit value-version objects if needed, but such a representation must preserve this semantic rule and must not be introduced merely to imitate SSA.
+
+At a conditional join, definitions from each branch are retained as possible
+reaching definitions. A later use has DATA dependencies on every such possible
+definition. This does not introduce a MergeNode, SSA, or a value-version
+representation.
 
 ---
 

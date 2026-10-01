@@ -114,7 +114,11 @@ Required invariants include:
 
 - graph construction preserves native semantic identity;
 - DATA edges represent actual value dependencies;
-- CONTROL edges represent predicate control;
+- CONTROL edges represent predicate control with true/false branch polarity;
+- conditional joins preserve branch definitions as possible reaching definitions,
+  and later uses have DATA dependencies on each possible definition;
+- conditional reaching definitions do not require a MergeNode, SSA, or a
+  value-version representation;
 - communication source ordering is preserved separately from DATA dependence;
 - `UnifiedSemanticGraph.nodes` preserves builder source or expanded semantic-occurrence order without fabricating a DATA edge;
 - `x = x + a` does not create an artificial Assign self-loop;

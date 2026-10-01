@@ -49,7 +49,7 @@ def test_nodes_retain_native_semantic_objects_and_edges_connect_them() -> None:
     for node in (receive, assign, predicate, send):
         graph.add_node(node)
     data = graph.add_data_edge(receive, assign)
-    control = graph.add_control_edge(predicate, send)
+    control = graph.add_control_edge(predicate, send, True)
 
     assert receive.semantic_object is assignment
     assert assign.semantic_object is assignment
@@ -59,6 +59,7 @@ def test_nodes_retain_native_semantic_objects_and_edges_connect_them() -> None:
     assert isinstance(control, ControlEdge)
     assert data.source is receive and data.target is assign
     assert control.source is predicate and control.target is send
+    assert control.polarity is True
     assert graph.data_edges == (data,)
     assert graph.control_edges == (control,)
 
@@ -87,14 +88,22 @@ def test_edges_reject_nodes_outside_the_graph(edge_type) -> None:
     graph.add_node(inside)
 
     with pytest.raises(ValueError, match="nodes in this graph"):
-        graph.add_edge(edge_type(inside, outside))
+        edge = (
+            edge_type(inside, outside)
+            if edge_type is DataEdge
+            else edge_type(inside, outside, True)
+        )
+        graph.add_edge(edge)
 
 
 def test_model_contains_only_native_references_and_semantic_edge_endpoints() -> None:
     for node_type in (ReceiveNode, SendNode, AssignNode, PredicateNode):
         assert [field.name for field in fields(node_type)] == ["semantic_object"]
     for edge_type in (DataEdge, ControlEdge):
-        assert [field.name for field in fields(edge_type)] == ["source", "target"]
+        expected = ["source", "target"]
+        if edge_type is ControlEdge:
+            expected.append("polarity")
+        assert [field.name for field in fields(edge_type)] == expected
 
     graph = UnifiedSemanticGraph()
     assert not any(
@@ -203,7 +212,7 @@ endmodule
     assert not any(edge.source is assign and edge.target is assign for edge in graph.data_edges)
 
 
-def test_builder_rejects_unsupported_executable_statement_forms() -> None:
+def test_builder_builds_simple_if_assignment() -> None:
     block = _block("""\
 module unsupported(input logic a);
   logic x;
@@ -213,8 +222,189 @@ module unsupported(input logic a);
 endmodule
 """)
 
-    with pytest.raises(USGBuilderError, match="unsupported executable statement"):
-        build_straight_line_usg(block)
+    graph = build_straight_line_usg(block)
+
+    assert isinstance(graph.nodes[0], PredicateNode)
+    assert isinstance(graph.nodes[1], AssignNode)
+    assert graph.control_edges == (ControlEdge(graph.nodes[0], graph.nodes[1], True),)
+
+
+CONDITIONAL_SOURCE_PREFIX = """\
+interface Channel;
+  task Receive(output logic [7:0] data); endtask
+  task Send(input logic [7:0] data); endtask
+endinterface
+"""
+
+
+def test_builder_builds_simple_if_with_predicate_data_and_true_control() -> None:
+    block = _block(CONDITIONAL_SOURCE_PREFIX + """
+module simple_if(Channel A, B);
+  logic [7:0] a;
+  always begin
+    A.Receive(a);
+    if (a[0]) B.Send(a);
+  end
+endmodule
+""")
+    receive_statement, conditional = block.body.list
+
+    graph = build_straight_line_usg(block)
+    receive, predicate, send = graph.nodes
+
+    assert isinstance(receive, ReceiveNode)
+    assert isinstance(predicate, PredicateNode)
+    assert isinstance(send, SendNode)
+    assert predicate.semantic_object is conditional.conditions[0].expr
+    assert send.semantic_object is conditional.ifTrue.expr
+    assert graph.data_edges == (
+        DataEdge(receive, predicate),
+        DataEdge(receive, send),
+    )
+    assert graph.control_edges == (ControlEdge(predicate, send, True),)
+    assert receive.semantic_object is receive_statement.expr
+
+
+def test_builder_builds_if_else_in_expanded_occurrence_order() -> None:
+    block = _block(CONDITIONAL_SOURCE_PREFIX + """
+module if_else(Channel A, B, C);
+  logic [7:0] a;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin
+      B.Send(a);
+    end
+    else begin
+      C.Send(a);
+    end
+  end
+endmodule
+""")
+
+    graph = build_straight_line_usg(block)
+    receive, predicate, true_send, false_send = graph.nodes
+
+    assert tuple(type(node) for node in graph.nodes) == (
+        ReceiveNode,
+        PredicateNode,
+        SendNode,
+        SendNode,
+    )
+    assert graph.data_edges == (
+        DataEdge(receive, predicate),
+        DataEdge(receive, true_send),
+        DataEdge(receive, false_send),
+    )
+    assert graph.control_edges == (
+        ControlEdge(predicate, true_send, True),
+        ControlEdge(predicate, false_send, False),
+    )
+
+
+def test_builder_recursively_builds_nested_if_with_parent_controls() -> None:
+    block = _block(CONDITIONAL_SOURCE_PREFIX + """
+module nested_if(Channel A, B, C, D);
+  logic [7:0] a;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin
+      if (a[1]) B.Send(a);
+      else C.Send(a);
+    end
+    else D.Send(a);
+  end
+endmodule
+""")
+
+    graph = build_straight_line_usg(block)
+    receive, outer_predicate, inner_predicate, inner_true, inner_false, outer_false = graph.nodes
+
+    assert tuple(type(node) for node in graph.nodes) == (
+        ReceiveNode,
+        PredicateNode,
+        PredicateNode,
+        SendNode,
+        SendNode,
+        SendNode,
+    )
+    assert graph.data_edges == (
+        DataEdge(receive, outer_predicate),
+        DataEdge(receive, inner_predicate),
+        DataEdge(receive, inner_true),
+        DataEdge(receive, inner_false),
+        DataEdge(receive, outer_false),
+    )
+    assert graph.control_edges == (
+        ControlEdge(outer_predicate, inner_predicate, True),
+        ControlEdge(outer_predicate, inner_true, True),
+        ControlEdge(inner_predicate, inner_true, True),
+        ControlEdge(outer_predicate, inner_false, True),
+        ControlEdge(inner_predicate, inner_false, False),
+        ControlEdge(outer_predicate, outer_false, False),
+    )
+
+
+def test_builder_merges_definitions_from_both_if_else_branches() -> None:
+    block = _block(CONDITIONAL_SOURCE_PREFIX + """
+module both_branch_definitions(Channel B, input logic select, input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    if (select) begin
+      x = a;
+    end
+    else begin
+      x = a;
+    end
+    B.Send(x);
+  end
+endmodule
+""")
+
+    graph = build_straight_line_usg(block)
+    predicate, true_assign, false_assign, send = graph.nodes
+
+    assert tuple(type(node) for node in graph.nodes) == (
+        PredicateNode,
+        AssignNode,
+        AssignNode,
+        SendNode,
+    )
+    assert graph.data_edges == (
+        DataEdge(true_assign, send),
+        DataEdge(false_assign, send),
+    )
+    assert graph.control_edges == (
+        ControlEdge(predicate, true_assign, True),
+        ControlEdge(predicate, false_assign, False),
+    )
+
+
+def test_builder_merges_true_branch_with_pre_if_definition() -> None:
+    block = _block(CONDITIONAL_SOURCE_PREFIX + """
+module partial_branch_definition(Channel A, B, input logic select, input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    A.Receive(x);
+    if (select) x = a;
+    B.Send(x);
+  end
+endmodule
+""")
+
+    graph = build_straight_line_usg(block)
+    receive, predicate, true_assign, send = graph.nodes
+
+    assert tuple(type(node) for node in graph.nodes) == (
+        ReceiveNode,
+        PredicateNode,
+        AssignNode,
+        SendNode,
+    )
+    assert graph.data_edges == (
+        DataEdge(receive, send),
+        DataEdge(true_assign, send),
+    )
+    assert graph.control_edges == (ControlEdge(predicate, true_assign, True),)
 
 
 @pytest.mark.parametrize(
