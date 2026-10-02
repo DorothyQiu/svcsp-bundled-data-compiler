@@ -417,30 +417,89 @@ backend capability
 Its responsibilities include deciding:
 
 ```text
-stage boundaries
-operation placement
-predicate placement
-cross-stage values
-required storage
-state lifetime
+logical execution phases
+operation and predicate placement within those phases
+cross-phase value requirements
+physical realization strategy
+required storage and state lifetime
 datapath-to-control relationships
 ```
 
-### 11.1 Stage Boundaries
+This planning layer has two distinct concepts: Logical Execution Partitioning
+and Realization Planning. A logical execution phase is not a physical
+asynchronous pipeline stage.
 
-Communication ordering is a primary constraint on stage construction.
+### 11.1 Logical Execution Partitioning
 
-DATA dependence alone does not necessarily require a stage boundary.
+Logical Execution Partitioning partitions source semantics into ordered,
+path-aware execution phases. It preserves communication ordering and source
+control semantics while identifying work that may execute as part of the same
+logical phase.
 
-Independent combinational operations may remain within the same stage when the backend permits it.
+A phase may contain zero or more Receive operations, RTL/control logic, and
+zero or more Send operations. Independent parallel communications, and
+conditional or mutually-exclusive communications, may remain in one phase when
+their semantics permit it.
 
-### 11.2 Cross-Stage State
+Communication ordering is a primary constraint on logical partitioning. DATA
+dependence alone does not necessarily require a phase boundary.
 
-If a value is produced before a required stage boundary and consumed after that boundary, the planner must arrange for the value to survive across the boundary.
+Canonical examples:
+
+```text
+Receive -> Send
+```
+
+is one logical phase, as is:
+
+```text
+Receive -> comb -> Send
+```
+
+In contrast:
+
+```text
+Receive -> comb -> Send -> comb -> Send
+```
+
+is two logical phases. Whether and how those phases become physical stages is
+a separate Realization Planning decision.
+
+### 11.2 Cross-Phase Value Requirements
+
+After logical partitioning, the planner derives cross-phase value requirements
+from existing producer/consumer lifetime facts. If a value is produced in one
+phase and consumed in a later phase, the realization plan must preserve it for
+the required lifetime. This derivation must not reinterpret source semantics or
+infer physical placement merely from a DATA edge.
+
+### 11.3 Realization Planning
+
+Realization Planning selects how a sequence of logical phases is realized.
+The phases may be realized spatially as multiple physical pipeline stages, or
+temporally through an explicit controller/state organization and stored values.
+It makes the required storage, state lifetime, datapath-to-control
+relationships, and physical stage boundaries explicit.
+
+Feedback and recurrence are supported through explicit planned state; they do
+not automatically require another physical pipeline stage. For example:
+
+```systemverilog
+x = x + a;
+```
+
+uses the earlier stored value of `x` and plans the later value as explicit
+state. It is not rejected solely because it is a feedback recurrence.
+
+### 11.4 Physical State Across Realized Boundaries
+
+If Realization Planning places a required value on opposite sides of a physical
+pipeline-stage boundary, it must arrange for the value to survive across that
+boundary.
 
 That may require physical state such as a register or equivalent stage storage.
-
-Therefore the hardware between asynchronous control elements must not be assumed to be purely combinational.
+Therefore the hardware between asynchronous control elements must not be
+assumed to be purely combinational.
 
 ---
 
