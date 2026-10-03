@@ -40,7 +40,7 @@ RTL-library interface or generated RTL.
   to `0` using the active-low asynchronous `reset_n` input.
 - `Lreq` and `Rack` must remain at four-phase idle `0` while reset is asserted
   and during reset release. Reset must not be added as gating to `click`.
-- Stage data and carry storage have no reset.
+- Stage data storage has no reset.
 - Persistent-state reset is source- and architecture-dependent.
 - Compiler-generated combinational datapath may be synthesis-optimized.
 - Controller topology should remain structurally identifiable after synthesis.
@@ -123,6 +123,43 @@ input topology rather than a simple linear stage.
 Compiler-generated internal channels count as upstream and downstream channels
 exactly like source-level channels for this classification.
 
+## Source-type Click
+
+A Source-type controller is selected only when a region has zero upstream
+handshaked channels. Its controller interface contains only `Rack`, `Rreq`,
+and `reset_n`; it has no `Lreq`, `Lack`, `Ldata`, `Iport`, or carry ports.
+It has one active-low asynchronously reset `click_dff_reset_n`, `Po`, whose
+output is `Rreq` and whose input is `~Rreq`.
+
+```text
+click = Rreq XNOR Rack
+```
+
+The compiler-generated datapath produces the outgoing payload. Its result is
+captured by `stage_storage` on the same positive edge of `click` and becomes
+`Rdata`. If a compiler-generated internal phase channel feeds the region, that
+channel is an upstream handshaked channel and the region is no longer
+Source-type.
+
+## Sink-type Click
+
+A Sink-type region has one or more upstream handshaked inputs and no downstream
+handshaked output. The simple Sink controller is the one-upstream-input case.
+Its interface contains only `Lreq`, `Lack`, and `reset_n`; it has no `Iport`
+or `Oport`. It has one active-low asynchronously reset `click_dff_reset_n`,
+`Pi`, whose output is `Lack` and whose input is `~Lack`.
+
+```text
+click = Lreq XOR Lack
+```
+
+The incoming payload is `Ldata`, and the matched delay remains on `Lreq`
+before the controller. A Sink does not require generic `stage_storage` merely
+because it is a Sink: terminal computation may consume `Ldata` directly.
+Persistent-state updates use separate, explicit persistent-state storage. If a
+compiler-generated internal channel leaves the region, the region has a
+downstream handshaked output and is not a Sink.
+
 ## Phase-Decoupled Click v1
 
 The current Phase-Decoupled Click v1 implementation assumption is a
@@ -149,11 +186,14 @@ rtl_lib/primitives/click_dff.sv
 rtl_lib/primitives/click_dff_reset_n.sv
 rtl_lib/controllers/basic_click_ctrl.sv
 rtl_lib/controllers/phase_decoupled_click_ctrl.sv
+rtl_lib/controllers/source_click_ctrl.sv
+rtl_lib/controllers/sink_click_ctrl.sv
 rtl_lib/stages/linear_stage.sv
 rtl_lib/storage/stage_storage.sv
 rtl_lib/delay/matched_delay.sv
 ```
 
-The Basic Click and Phase-Decoupled Click v1 controllers, matched delay, and
-stage-storage primitives are defined. Exact implementations and ports for the
-linear stage remain pending the gate-level template definitions.
+The Basic Click, Phase-Decoupled Click v1, Source-type Click, and Sink-type
+Click controllers, matched delay, and stage-storage primitives are defined.
+Exact implementations and ports for the linear stage remain pending the
+gate-level template definitions.
