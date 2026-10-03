@@ -14,12 +14,10 @@ Use these signal names for the left and right interfaces of a stage:
 Lreq     left request
 Lack     left acknowledge
 Ldata    left primary data payload
-Lcarry   left sideband payload
 
 Rreq     right request
 Rack     right acknowledge
 Rdata    right primary data payload
-Rcarry   right sideband payload
 
 click    local stage-storage capture event
 reset_n  active-low asynchronous reset
@@ -34,12 +32,8 @@ RTL-library interface or generated RTL.
 - Control, interconnect, and datapath connections use `wire`.
 - Wrappers and generated control must not infer flip-flops or latches.
 - Stage storage is represented by an explicit storage module.
-- Persistent state uses separate, explicit state storage; it is not stage
-  carry payload.
-- `Lcarry` and `Rcarry` are sideband payload associated with the same stage
-  handshake, not an independent channel.
-- `Rdata` and `Rcarry` are captured by the same stage storage on the positive
-  edge of `click`.
+- Persistent state uses separate, explicit state storage.
+- `Rdata` is captured by stage storage on the positive edge of `click`.
 - `click` is the local positive-edge clock event, never a clock enable on
   another clock. Basic Click stages have no global or local clock input.
 - By default, only Click-controller state is reset. Basic Click state resets
@@ -65,8 +59,13 @@ Lack <-              Click controller <- Rack
                             v
 Ldata  ----\\
             -> combinational datapath -> Stage Storage -> Rdata
-Lcarry ----/                                  |
-                                              -> Rcarry
+```
+
+Basic and linear channel interfaces use only:
+
+```text
+Lreq / Lack / Ldata
+Rreq / Rack / Rdata
 ```
 
 The matched delay is a parameterized, structural buffer chain on `Lreq` before
@@ -89,17 +88,10 @@ combinationally as:
 ( Lreq & ~Lack & ~Rack)
 ```
 
-The stage's data and carry storage are explicit, unreset flip-flop banks. Both
-are clocked by the same positive edge of `click`; `click` is not an enable on
-a separate clock. Consequently, `Rdata` and `Rcarry` update together for the
-same token, and no extra carry-register stage is introduced. Persistent state,
-when required, uses separate explicit state storage whose reset behavior is
-selected by the source and architecture.
-
-`Lcarry` and `Rcarry` carry compiler-planned cross-phase `DATA` and `CONTROL`
-values. They have no independent request/acknowledge handshake and must pass
-through stage storage; they must never bypass it. Persistent state is not
-carried through `Lcarry` or `Rcarry`.
+Stage data storage is an explicit, unreset flip-flop bank clocked by the
+positive edge of `click`; `click` is not an enable on a separate clock.
+Persistent state, when required, uses separate explicit state storage whose
+reset behavior is selected by the source and architecture.
 
 A value that survives more than one logical boundary is stored and forwarded
 through every intervening stage. For example:
@@ -111,8 +103,25 @@ C.Receive(c);
 D.Send(a + c);
 ```
 
-Planning requires `a` to survive `P0 -> P1`, so `a` is represented in the
-`P0 Rcarry` / `P1 Lcarry` payload.
+The logical plan is `P0 = A.Receive / B.Send`, `P1 = C.Receive / D.Send`,
+with boundary survival `{a}`. When pipeline realization is selected, one
+compiler-generated bundled-data internal channel carries `a` from P0 to P1.
+Its `req` and `ack` carry phase progression and completion; its `data` packs
+all survival values for the boundary. This does not widen either external
+source-level channel payload.
+
+P1 has two handshaked inputs: the compiler-generated phase channel carrying
+`a`, and source channel `C` carrying `c`. It therefore requires a Join-type
+input topology rather than a simple linear stage.
+
+## Hardware-Topology Classification
+
+- Zero upstream handshaked channels: Source-type candidate.
+- One upstream handshaked channel: linear/Reg-type candidate.
+- Multiple upstream handshaked channels: Join-type structure.
+
+Compiler-generated internal channels count as upstream and downstream channels
+exactly like source-level channels for this classification.
 
 ## Phase-Decoupled Click v1
 

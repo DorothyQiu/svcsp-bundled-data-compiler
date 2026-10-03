@@ -464,12 +464,12 @@ Canonical two-phase example:
 A.Receive(a);
 B.Send(a);
 C.Receive(c);
-D.Send(c);
+D.Send(a + c);
 ```
 
 `C.Receive(c)` is ordered after `B.Send(a)`, so the Send -> Receive transition
 creates the barrier. `A.Receive(a)` and `B.Send(a)` are in the first phase;
-`C.Receive(c)` and `D.Send(c)` are in the second phase.
+`C.Receive(c)` and `D.Send(a + c)` are in the second phase.
 
 ### 11.2 Default Combinational Operation Placement
 
@@ -566,7 +566,8 @@ persistent-state requirements.
 
 These requirements are semantic only. They do not choose FFs, muxes,
 registers, or a pipeline-versus-state realization, and they do not create
-state, Phi, or Merge nodes in the USG.
+state, Phi, Merge, synthetic Send, or synthetic Receive nodes in the USG or
+logical plan.
 
 Examples:
 
@@ -666,13 +667,56 @@ x = x + a;
 uses the earlier stored value of `x` and plans the later value as explicit
 state. It is not rejected solely because it is a feedback recurrence.
 
+#### 11.6.1 Pipeline Realization
+
+Semantic planning continues to expose logical phase boundaries and their
+`DATA` and `CONTROL` survival requirements. It does not materialize these
+requirements as synthetic Send or Receive nodes in the USG or logical plan.
+
+When pipeline realization is selected, each logical phase boundary is
+materialized as one compiler-generated bundled-data internal channel. The
+internal channel has `req`, `ack`, and `data`: `req` and `ack` carry phase
+progression and completion, while `data` packs every value that must survive
+the boundary. Multiple `DATA` and `CONTROL` survival values share this one
+packed payload.
+
+Compiler-private values must never widen an external source-level channel
+payload. The packed payload exists only on the compiler-generated internal
+channel. If state realization is selected instead, an internal pipeline
+channel is not inherently required.
+
+The canonical example has this logical plan:
+
+```text
+P0 = A.Receive / B.Send
+P1 = C.Receive / D.Send
+boundary survival = {a}
+```
+
+Pipeline realization creates one internal channel carrying `a` from P0 to P1.
+P1 therefore has two handshaked inputs: the compiler-generated phase channel
+carrying `a`, and source channel `C` carrying `c`. P1 requires a join-type
+input topology rather than a simple linear stage.
+
+#### 11.6.2 Hardware-Topology Classification
+
+For hardware-topology classification, every source-level and
+compiler-generated internal channel is a handshaked channel. A structure with
+zero upstream handshaked channels is a Source-type candidate; one upstream
+handshaked channel is a linear/Reg-type candidate; and multiple upstream
+handshaked channels require a Join-type structure. Compiler-generated internal
+channels count as upstream and downstream channels exactly like source-level
+channels.
+
 ### 11.7 Physical State Across Realized Boundaries
 
 If Realization Planning places a required value on opposite sides of a physical
 pipeline-stage boundary, it must arrange for the value to survive across that
 boundary.
 
-That may require physical state such as a register or equivalent stage storage.
+Under pipeline realization, the compiler-generated internal channel provides
+the explicit bundled-data boundary realization. Under state realization, this
+may instead require physical state such as a register or equivalent storage.
 Therefore the hardware between asynchronous control elements must not be
 assumed to be purely combinational.
 
