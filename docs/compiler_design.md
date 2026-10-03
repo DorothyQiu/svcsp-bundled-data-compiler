@@ -444,6 +444,11 @@ their semantics permit it.
 Communication ordering is a primary constraint on logical partitioning. DATA
 dependence alone does not necessarily require a phase boundary.
 
+Stage-local RTL/control operations may be scheduled earlier or later within a
+logical phase when required values and control are already available, DATA and
+CONTROL semantics are preserved, source read/write semantics are preserved,
+and required communication ordering is preserved.
+
 Canonical examples:
 
 ```text
@@ -456,14 +461,30 @@ is one logical phase, as is:
 Receive -> comb -> Send
 ```
 
-In contrast:
+The following may also remain one logical phase:
 
-```text
-Receive -> comb -> Send -> comb -> Send
+```systemverilog
+A.Receive(a);
+t = a + 1;
+B.Send(t);
+u = t + 1;
+C.Send(u);
 ```
 
-is two logical phases. Whether and how those phases become physical stages is
-a separate Realization Planning decision.
+`u` may be computed before `B.Send(t)`, while the required communication order
+of `B.Send(t)` before `C.Send(u)` is preserved.
+
+In contrast, the following requires a later logical execution phase:
+
+```systemverilog
+A.Receive(a);
+B.Send(a);
+C.Receive(c);
+D.Send(c);
+```
+
+`C.Receive(c)` must occur after `B.Send(a)`, and `D.Send(c)` depends on the
+newly received `c`.
 
 ### 11.2 Cross-Phase Value Requirements
 
