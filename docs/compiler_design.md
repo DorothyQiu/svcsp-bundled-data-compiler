@@ -471,15 +471,83 @@ D.Send(c);
 creates the barrier. `A.Receive(a)` and `B.Send(a)` are in the first phase;
 `C.Receive(c)` and `D.Send(c)` are in the second phase.
 
-### 11.2 Cross-Phase Value Requirements
+### 11.2 Default Combinational Operation Placement
 
-After logical partitioning, the planner derives cross-phase value requirements
-from existing producer/consumer lifetime facts. If a value is produced in one
-phase and consumed in a later phase, the realization plan must preserve it for
-the required lifetime. This derivation must not reinterpret source semantics or
-infer physical placement merely from a DATA edge.
+The default placement policy puts phase-local combinational logic upstream of
+the FF or other storage associated with the phase where its result is first
+required. If an intermediate is not required in an earlier phase, the planner
+carries its operands forward and computes that intermediate in the later phase.
+It must not precompute and carry an intermediate merely because its operands
+were available earlier.
 
-### 11.3 Realization Planning
+Conversely, if an earlier-phase consumer already requires a result, the planner
+computes it in that earlier phase and carries that result forward when later
+phases also require it. The same default principle applies to Predicate
+computation.
+
+This is a default planning policy, not a claim that alternative optimizations
+are impossible. Feedback and persistent state remain separate state-planning
+cases.
+
+Example 1:
+
+```systemverilog
+A.Receive(a);        // P0
+B.Send(a);           // P0
+C.Receive(c);        // P1
+u = a + 1;
+D.Send(u);           // P1
+```
+
+Carry `a` to P1 and compute `u` in P1.
+
+Example 2:
+
+```systemverilog
+A.Receive(a);        // P0
+t = a + 1;
+B.Send(t);           // P0
+C.Receive(c);        // P1
+u = t + c;
+D.Send(u);           // P1
+```
+
+Compute `t` in P0 because `B.Send(t)` requires it, carry `t` to P1, and
+compute `u` in P1.
+
+### 11.3 Cross-Phase Survival Requirements
+
+After logical partitioning and combinational operation placement, the planner
+derives semantic cross-phase survival requirements from existing
+producer/consumer lifetime facts and CONTROL edges. These requirements describe
+the values or control results that must survive logical phase boundaries; they
+are not storage, register, persistent-state, or physical-realization decisions.
+
+#### DATA Survival
+
+If a graph-local Receive or Assign definition is produced in phase P and an
+exact reaching use is placed in a later phase Q, the definition's value must
+survive every logical boundary from P through Q.
+
+Parameters require no carry. Local-entry and persistent-state handling remain
+separate planning cases. The planner must not invent a DATA survival
+requirement for a value without a graph-local producer.
+
+#### CONTROL Survival
+
+If a Predicate is placed in phase P and controls an operation in a later phase
+Q, its control result must survive every intervening logical boundary.
+
+The existing placement examples illustrate that DATA survival follows the
+actual placed producer/consumer relation. In Example 1, `a` is produced by
+`A.Receive(a)` in P0 and is consumed by the P1 computation of `u`, so `a` has
+the DATA survival requirement from P0 to P1; `u` does not need to be carried
+from P0 because it is produced in P1. In Example 2, `t` is produced in P0 for
+`B.Send(t)` and consumed by the P1 computation of `u`, so `t` has the DATA
+survival requirement from P0 to P1. The planner carries `t`, not `a`, because
+the placed producer of the later consumer is the definition of `t`.
+
+### 11.4 Realization Planning
 
 Realization Planning selects how a sequence of logical phases is realized.
 The phases may be realized spatially as multiple physical pipeline stages, or
@@ -497,7 +565,7 @@ x = x + a;
 uses the earlier stored value of `x` and plans the later value as explicit
 state. It is not rejected solely because it is a feedback recurrence.
 
-### 11.4 Physical State Across Realized Boundaries
+### 11.5 Physical State Across Realized Boundaries
 
 If Realization Planning places a required value on opposite sides of a physical
 pipeline-stage boundary, it must arrange for the value to survive across that
