@@ -780,6 +780,80 @@ endmodule
     assert facts.predecessors_of(send) == (receive_b, receive_c)
 
 
+def test_value_use_records_entry_reachability_after_conditional_definition() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module conditional_use_entry(Channel B, input logic p, input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    if (p) x = a;
+    B.Send(x);
+  end
+endmodule
+"""))
+    _, assign, send = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.uses_of(send)
+    value_use = facts.value_use_of(send, x_symbol)
+
+    assert value_use.reaching_producers == (assign,)
+    assert value_use.entry_value_may_reach is True
+
+
+def test_value_use_clears_entry_reachability_after_if_else_definitions() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module if_else_use_entry(Channel B, input logic p, input logic [7:0] a, b);
+  logic [7:0] x;
+  always begin
+    if (p) x = a;
+    else x = b;
+    B.Send(x);
+  end
+endmodule
+"""))
+    _, true_assign, false_assign, send = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.uses_of(send)
+    value_use = facts.value_use_of(send, x_symbol)
+
+    assert value_use.reaching_producers == (true_assign, false_assign)
+    assert value_use.entry_value_may_reach is False
+
+
+def test_value_use_clears_entry_reachability_after_straight_line_definition() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module straight_use_entry(Channel B, input logic [7:0] a);
+  logic [7:0] x;
+  always begin
+    x = a;
+    B.Send(x);
+  end
+endmodule
+"""))
+    assign, send = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.uses_of(send)
+    value_use = facts.value_use_of(send, x_symbol)
+
+    assert value_use.reaching_producers == (assign,)
+    assert value_use.entry_value_may_reach is False
+
+
+def test_value_use_records_entry_reachability_without_a_graph_local_definition() -> None:
+    graph = build_straight_line_usg(_block(CONDITIONAL_SOURCE_PREFIX + """
+module undefined_local_use(Channel B);
+  logic [7:0] x;
+  always B.Send(x);
+endmodule
+"""))
+    (send,) = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.uses_of(send)
+    value_use = facts.value_use_of(send, x_symbol)
+
+    assert value_use.reaching_producers == ()
+    assert value_use.entry_value_may_reach is True
+
+
 def test_exit_reaching_value_replaces_entry_after_self_assignment() -> None:
     graph = build_straight_line_usg(_block("""\
 module exit_self_assignment(input logic [7:0] a);

@@ -49,6 +49,7 @@ class ValueUse:
     symbol: SemanticValueSymbol
     origin: ValueOrigin
     reaching_producers: tuple[DefinitionNode, ...]
+    entry_value_may_reach: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,10 +283,14 @@ class _OccurrenceAnalyzer:
             if isinstance(symbol, VariableSymbol):
                 _ensure_reaching_variable(reaching, symbol)
                 producers = _reaching_definitions(reaching, symbol)
+                entry_value_may_reach = _entry_value_may_reach(reaching, symbol)
             else:
                 producers = ()
+                entry_value_may_reach = False
             origin = _value_origin(symbol, producers)
-            value_use = ValueUse(node, symbol, origin, producers)
+            value_use = ValueUse(
+                node, symbol, origin, producers, entry_value_may_reach
+            )
             self.value_uses.append(value_use)
             if not producers:
                 self.uses_without_graph_local_producer.append((node, symbol))
@@ -408,6 +413,15 @@ def _reaching_definitions(
         if known is variable:
             return definitions
     return ()
+
+
+def _entry_value_may_reach(
+    reaching: _ReachingDefinitions, variable: VariableSymbol
+) -> bool:
+    for known, _, entry_value_may_reach in reaching:
+        if known is variable:
+            return entry_value_may_reach
+    return True
 
 
 def _ensure_reaching_variable(
