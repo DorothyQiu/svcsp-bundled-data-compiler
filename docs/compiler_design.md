@@ -432,49 +432,33 @@ asynchronous pipeline stage.
 ### 11.1 Logical Execution Partitioning
 
 Logical Execution Partitioning partitions source semantics into ordered,
-path-aware execution phases. It preserves communication ordering and source
-control semantics while identifying work that may execute as part of the same
-logical phase.
+path-aware execution phases. A phase may contain zero or more Receive
+operations, RTL/control logic, and zero or more Send operations.
 
-A phase may contain zero or more Receive operations, RTL/control logic, and
-zero or more Send operations. Independent parallel communications, and
-conditional or mutually-exclusive communications, may remain in one phase when
+Along one execution path, an ordered Send -> later Receive transition is a
+logical-phase barrier. Receive -> Receive, Receive -> Send, and Send -> Send
+transitions do not by themselves create a new phase. DATA dependence alone
+does not necessarily create a phase boundary, and feedback does not itself
+create a phase boundary.
+
+Being in the same phase does not imply that communications are concurrent.
+Partitioning preserves source sequential, conditional, and explicit parallel
+semantics. Independent parallel communications, and conditional or
+mutually-exclusive communications, may therefore remain in one phase when
 their semantics permit it.
 
-Communication ordering is a primary constraint on logical partitioning. DATA
-dependence alone does not necessarily require a phase boundary.
+Branches inherit their incoming phase state independently. After a control-flow
+join, subsequent operations shared by the paths use the latest phase required
+by any incoming path. This is the conservative v0 join rule.
 
-Stage-local RTL/control operations may be scheduled earlier or later within a
-logical phase when required values and control are already available, DATA and
-CONTROL semantics are preserved, source read/write semantics are preserved,
-and required communication ordering is preserved.
+Assign and Predicate placement is a subsequent dependency-aware scheduling
+step, not a consequence of their textual position. Such operations may be
+scheduled earlier or later within a logical phase only when required values and
+control are already available, DATA and CONTROL semantics are preserved, source
+read/write semantics are preserved, and required communication ordering is
+preserved.
 
-Canonical examples:
-
-```text
-Receive -> Send
-```
-
-is one logical phase, as is:
-
-```text
-Receive -> comb -> Send
-```
-
-The following may also remain one logical phase:
-
-```systemverilog
-A.Receive(a);
-t = a + 1;
-B.Send(t);
-u = t + 1;
-C.Send(u);
-```
-
-`u` may be computed before `B.Send(t)`, while the required communication order
-of `B.Send(t)` before `C.Send(u)` is preserved.
-
-In contrast, the following requires a later logical execution phase:
+Canonical two-phase example:
 
 ```systemverilog
 A.Receive(a);
@@ -483,8 +467,9 @@ C.Receive(c);
 D.Send(c);
 ```
 
-`C.Receive(c)` must occur after `B.Send(a)`, and `D.Send(c)` depends on the
-newly received `c`.
+`C.Receive(c)` is ordered after `B.Send(a)`, so the Send -> Receive transition
+creates the barrier. `A.Receive(a)` and `B.Send(a)` are in the first phase;
+`C.Receive(c)` and `D.Send(c)` are in the second phase.
 
 ### 11.2 Cross-Phase Value Requirements
 
