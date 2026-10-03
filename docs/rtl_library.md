@@ -114,6 +114,23 @@ D.Send(a + c);
 Planning requires `a` to survive `P0 -> P1`, so `a` is represented in the
 `P0 Rcarry` / `P1 Lcarry` payload.
 
+## Phase-Decoupled Click v1
+
+The current Phase-Decoupled Click v1 implementation assumption is a
+two-state structural controller. `Pi` drives `Lack` and `Po` drives `Rreq`.
+Each is an active-low asynchronously reset `click_dff_reset_n` with inverter
+feedback (`D = ~Q`). `Pi` and `Po` both toggle on the same positive edge of
+`click`.
+
+```text
+input_pending = Lreq XOR Lack
+output_ready  = Rreq XNOR Rack
+click         = input_pending AND output_ready
+```
+
+The controller has no global clock, behavioral FSM, or state beyond `Pi` and
+`Po`.
+
 ## Planned Library Components
 
 The following component paths define the initial library layout:
@@ -128,6 +145,6 @@ rtl_lib/storage/stage_storage.sv
 rtl_lib/delay/matched_delay.sv
 ```
 
-Only the Basic Click controller, matched delay, and stage-storage primitives
-are defined so far. Exact implementations and ports for the phase-decoupled
-controller and linear stage remain pending the gate-level template definitions.
+The Basic Click and Phase-Decoupled Click v1 controllers, matched delay, and
+stage-storage primitives are defined. Exact implementations and ports for the
+linear stage remain pending the gate-level template definitions.
