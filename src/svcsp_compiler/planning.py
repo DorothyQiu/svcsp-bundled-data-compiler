@@ -3,11 +3,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .analysis import AnalysisFacts, CommunicationNode, ValueUse
+from .analysis import (
+    AnalysisFacts,
+    CommunicationNode,
+    DefinitionNode,
+    ValueOrigin,
+    ValueUse,
+)
 from .usg import AssignNode, ControlEdge, PredicateNode, ReceiveNode, SendNode, USGNode
 
 
 CombinationalNode = AssignNode | PredicateNode
+
+
+@dataclass(frozen=True, slots=True)
+class DataSurvivalRequirement:
+    """One graph-local definition's semantic survival across one phase boundary."""
+
+    producer: DefinitionNode
+    consumer: ValueUse
+    boundary_phase: int
+
+
+@dataclass(frozen=True, slots=True)
+class ControlSurvivalRequirement:
+    """One predicate result's semantic survival across one phase boundary."""
+
+    predicate: PredicateNode
+    controlled_operation: USGNode
+    boundary_phase: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +44,8 @@ class LogicalExecutionPhases:
 
     communication_phases: tuple[tuple[CommunicationNode, int], ...]
     operation_phases: tuple[tuple[CombinationalNode, int], ...]
+    data_survival_requirements: tuple[DataSurvivalRequirement, ...]
+    control_survival_requirements: tuple[ControlSurvivalRequirement, ...]
 
     def phase_of(self, node: USGNode) -> int:
         """Return the logical execution phase assigned to a placed ``node``."""
@@ -45,7 +71,19 @@ def partition_logical_execution(
     operation_phases = _combinational_operation_phases(
         facts, communication_phases, control_edges
     )
-    return LogicalExecutionPhases(communication_phases, operation_phases)
+    phases_by_node_id = {
+        id(node): phase for node, phase in communication_phases + operation_phases
+    }
+    data_requirements = _data_survival_requirements(facts, phases_by_node_id)
+    control_requirements = _control_survival_requirements(
+        control_edges, phases_by_node_id
+    )
+    return LogicalExecutionPhases(
+        communication_phases,
+        operation_phases,
+        data_requirements,
+        control_requirements,
+    )
 
 
 def _communication_phases(
@@ -147,3 +185,52 @@ def _set_earlier_phase(
     phases_by_node_id[id(node)] = requirement
     operation_phases[id(node)] = requirement
     return True
+
+
+def _data_survival_requirements(
+    facts: AnalysisFacts, phases_by_node_id: dict[int, int]
+) -> tuple[DataSurvivalRequirement, ...]:
+    """Derive per-boundary semantic lifetimes from exact reaching-use facts."""
+
+    requirements: list[DataSurvivalRequirement] = []
+    for consumer in facts.value_uses:
+        if consumer.origin is not ValueOrigin.GRAPH_LOCAL:
+            continue
+        consumer_phase = phases_by_node_id.get(id(consumer.node))
+        if consumer_phase is None:
+            continue
+        for producer in consumer.reaching_producers:
+            if not isinstance(producer, (ReceiveNode, AssignNode)):
+                continue
+            producer_phase = phases_by_node_id.get(id(producer))
+            if producer_phase is None or producer_phase >= consumer_phase:
+                continue
+            requirements.extend(
+                DataSurvivalRequirement(producer, consumer, boundary_phase)
+                for boundary_phase in range(producer_phase, consumer_phase)
+            )
+    return tuple(requirements)
+
+
+def _control_survival_requirements(
+    control_edges: tuple[ControlEdge, ...], phases_by_node_id: dict[int, int]
+) -> tuple[ControlSurvivalRequirement, ...]:
+    """Derive per-boundary semantic lifetimes from existing CONTROL edges."""
+
+    requirements: list[ControlSurvivalRequirement] = []
+    for edge in control_edges:
+        if not isinstance(edge.source, PredicateNode):
+            continue
+        predicate_phase = phases_by_node_id.get(id(edge.source))
+        controlled_phase = phases_by_node_id.get(id(edge.target))
+        if (
+            predicate_phase is None
+            or controlled_phase is None
+            or predicate_phase >= controlled_phase
+        ):
+            continue
+        requirements.extend(
+            ControlSurvivalRequirement(edge.source, edge.target, boundary_phase)
+            for boundary_phase in range(predicate_phase, controlled_phase)
+        )
+    return tuple(requirements)

@@ -2,7 +2,11 @@ import pytest
 from pyslang.ast import ProceduralBlockSymbol
 
 from svcsp_compiler.analysis import analyze_usg
-from svcsp_compiler.planning import partition_logical_execution
+from svcsp_compiler.planning import (
+    ControlSurvivalRequirement,
+    DataSurvivalRequirement,
+    partition_logical_execution,
+)
 from svcsp_compiler.semantic_frontend import parse_text
 from svcsp_compiler.usg import build_straight_line_usg
 
@@ -218,3 +222,149 @@ endmodule
 
     with pytest.raises(KeyError, match="not placed"):
         plan.phase_of(assign)
+
+
+def test_receive_used_by_a_phase_one_assign_requires_data_survival() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C, D);
+  logic [7:0] a, c, u;
+  always begin
+    A.Receive(a); B.Send(a); C.Receive(c); u = a + 1; D.Send(u);
+  end
+endmodule
+""")
+    receive_a, _, _, assign_u, _ = graph.nodes
+    (used_a,) = facts.uses_of(assign_u)
+    value_use = facts.value_use_of(assign_u, used_a)
+
+    assert plan.data_survival_requirements == (
+        DataSurvivalRequirement(receive_a, value_use, 0),
+    )
+
+
+def test_data_survival_carries_the_exact_t_definition_not_its_operands() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C, D);
+  logic [7:0] a, c, t, u;
+  always begin
+    A.Receive(a); t = a + 1; B.Send(t); C.Receive(c);
+    u = t + c; D.Send(u);
+  end
+endmodule
+""")
+    receive_a, assign_t, _, _, assign_u, _ = graph.nodes
+    used_t, _ = facts.uses_of(assign_u)
+    value_use = facts.value_use_of(assign_u, used_t)
+
+    assert plan.data_survival_requirements == (
+        DataSurvivalRequirement(assign_t, value_use, 0),
+    )
+    assert all(requirement.producer is not receive_a for requirement in plan.data_survival_requirements)
+
+
+def test_data_survival_emits_every_boundary_to_a_phase_two_consumer() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C, D, E, F);
+  logic [7:0] a, c, e, u;
+  always begin
+    A.Receive(a); B.Send(a); C.Receive(c); D.Send(c); E.Receive(e);
+    u = a + e; F.Send(u);
+  end
+endmodule
+""")
+    receive_a, _, _, _, _, assign_u, _ = graph.nodes
+    used_a, _ = facts.uses_of(assign_u)
+    value_use = facts.value_use_of(assign_u, used_a)
+
+    assert plan.data_survival_requirements == (
+        DataSurvivalRequirement(receive_a, value_use, 0),
+        DataSurvivalRequirement(receive_a, value_use, 1),
+    )
+
+
+def test_same_phase_data_use_requires_no_survival() -> None:
+    _, _, plan = _plan(_CHANNEL + """
+module m(Channel A, B);
+  logic [7:0] a, t;
+  always begin A.Receive(a); t = a + 1; B.Send(t); end
+endmodule
+""")
+
+    assert plan.data_survival_requirements == ()
+
+
+def test_parameter_use_requires_no_data_survival() -> None:
+    _, _, plan = _plan(_CHANNEL + """
+module m #(parameter logic [7:0] P = 1) (Channel A, B, C, D);
+  logic [7:0] a, c, u;
+  always begin
+    A.Receive(a); B.Send(a); C.Receive(c); u = P + c; D.Send(u);
+  end
+endmodule
+""")
+
+    assert plan.data_survival_requirements == ()
+
+
+def test_local_entry_use_requires_no_data_survival_yet() -> None:
+    _, _, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C, D);
+  logic [7:0] a, c, u, local_entry;
+  always begin
+    A.Receive(a); B.Send(a); C.Receive(c); u = local_entry + c; D.Send(u);
+  end
+endmodule
+""")
+
+    assert plan.data_survival_requirements == ()
+
+
+def test_predicate_controlling_a_phase_one_operation_requires_control_survival() -> None:
+    graph, _, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C, D);
+  logic [7:0] a, c;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin B.Send(a); C.Receive(c); D.Send(c); end
+  end
+endmodule
+""")
+    _, predicate, _, receive_c, _ = graph.nodes
+
+    assert ControlSurvivalRequirement(predicate, receive_c, 0) in plan.control_survival_requirements
+
+
+def test_predicate_controlling_a_phase_two_operation_requires_each_boundary() -> None:
+    graph, _, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C, D, E, F);
+  logic [7:0] a, c, e;
+  always begin
+    A.Receive(a);
+    if (a[0]) begin
+      B.Send(a); C.Receive(c); D.Send(c); E.Receive(e); F.Send(e);
+    end
+  end
+endmodule
+""")
+    _, predicate, _, _, _, receive_e, _ = graph.nodes
+    requirements = tuple(
+        requirement
+        for requirement in plan.control_survival_requirements
+        if requirement.controlled_operation is receive_e
+    )
+
+    assert requirements == (
+        ControlSurvivalRequirement(predicate, receive_e, 0),
+        ControlSurvivalRequirement(predicate, receive_e, 1),
+    )
+
+
+def test_same_phase_predicate_control_requires_no_survival() -> None:
+    _, _, plan = _plan(_CHANNEL + """
+module m(Channel A, B);
+  logic [7:0] a;
+  always begin A.Receive(a); if (a[0]) B.Send(a); end
+endmodule
+""")
+
+    assert plan.control_survival_requirements == ()
