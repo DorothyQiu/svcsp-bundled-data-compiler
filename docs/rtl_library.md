@@ -22,7 +22,7 @@ Rdata    right primary data payload
 Rcarry   right sideband payload
 
 click    local stage-storage capture event
-reset    reset
+reset_n  active-low asynchronous reset
 ```
 
 Do not use `data_in`, `data_out`, `carry_in`, `carry_out`, or `fire` in the
@@ -40,8 +40,12 @@ RTL-library interface or generated RTL.
   handshake, not an independent channel.
 - `Rdata` and `Rcarry` are captured by the same stage storage on the positive
   edge of `click`.
-- `click` is a local clock event, not a clock enable on another clock. Basic
-  Click stages have no global or local clock input.
+- `click` is the local positive-edge clock event, never a clock enable on
+  another clock. Basic Click stages have no global or local clock input.
+- By default, only Click-controller state is reset. Basic Click state resets
+  to `0` using the active-low asynchronous `reset_n` input.
+- Stage data and carry storage have no reset.
+- Persistent-state reset is source- and architecture-dependent.
 - Compiler-generated combinational datapath may be synthesis-optimized.
 - Controller topology should remain structurally identifiable after synthesis.
 
@@ -65,7 +69,7 @@ Lcarry ----/                                  |
 
 The matched delay is a parameterized, structural buffer chain on `Lreq` before
 the controller. The Basic Click controller inputs are delayed `Lreq`, `Rack`,
-and `reset`; its outputs are `Lack`, `Rreq`, and `click`. It has exactly one
+and `reset_n`; its outputs are `Lack`, `Rreq`, and `click`. It has exactly one
 controller-state flip-flop:
 
 ```text
@@ -74,18 +78,21 @@ Q    = Lack
 Rreq = Lack
 ```
 
-`reset` initializes `Q` and `Lack` to `0`. The flip-flop updates on the
-positive edge of `click`, where `click` is generated combinationally as:
+The active-low asynchronous `reset_n` initializes `Q` and `Lack` to `0`. The
+flip-flop updates on the positive edge of `click`, where `click` is generated
+combinationally as:
 
 ```text
 (~Lreq & Lack & Rack) |
 ( Lreq & ~Lack & ~Rack)
 ```
 
-The stage's data and carry storage are explicit flip-flop banks. Both are
-clocked by the same positive edge of `click`; `click` is not an enable on a
-separate clock. Consequently, `Rdata` and `Rcarry` update together for the
-same token, and no extra carry-register stage is introduced.
+The stage's data and carry storage are explicit, unreset flip-flop banks. Both
+are clocked by the same positive edge of `click`; `click` is not an enable on
+a separate clock. Consequently, `Rdata` and `Rcarry` update together for the
+same token, and no extra carry-register stage is introduced. Persistent state,
+when required, uses separate explicit state storage whose reset behavior is
+selected by the source and architecture.
 
 `Lcarry` and `Rcarry` carry compiler-planned cross-phase `DATA` and `CONTROL`
 values. They have no independent request/acknowledge handshake and must pass
@@ -107,10 +114,11 @@ Planning requires `a` to survive `P0 -> P1`, so `a` is represented in the
 
 ## Planned Library Components
 
-The following component paths are planned, but their internals are not defined
-by this document:
+The following component paths define the initial library layout:
 
 ```text
+rtl_lib/primitives/click_dff.sv
+rtl_lib/primitives/click_dff_reset_n.sv
 rtl_lib/controllers/basic_click_ctrl.sv
 rtl_lib/controllers/phase_decoupled_click_ctrl.sv
 rtl_lib/stages/linear_stage.sv
@@ -118,5 +126,6 @@ rtl_lib/storage/stage_storage.sv
 rtl_lib/delay/matched_delay.sv
 ```
 
-The exact controller implementations and port definitions are pending the
-gate-level template definitions.
+Only the Basic Click controller, matched delay, and stage-storage primitives
+are defined so far. Exact implementations and ports for the phase-decoupled
+controller and linear stage remain pending the gate-level template definitions.
