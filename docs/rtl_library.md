@@ -38,7 +38,10 @@ RTL-library interface or generated RTL.
   carry payload.
 - `Lcarry` and `Rcarry` are sideband payload associated with the same stage
   handshake, not an independent channel.
-- `Rdata` and `Rcarry` are captured by the same stage storage on `click`.
+- `Rdata` and `Rcarry` are captured by the same stage storage on the positive
+  edge of `click`.
+- `click` is a local clock event, not a clock enable on another clock. Basic
+  Click stages have no global or local clock input.
 - Compiler-generated combinational datapath may be synthesis-optimized.
 - Controller topology should remain structurally identifiable after synthesis.
 
@@ -59,6 +62,30 @@ Ldata  ----\\
 Lcarry ----/                                  |
                                               -> Rcarry
 ```
+
+The matched delay is a parameterized, structural buffer chain on `Lreq` before
+the controller. The Basic Click controller inputs are delayed `Lreq`, `Rack`,
+and `reset`; its outputs are `Lack`, `Rreq`, and `click`. It has exactly one
+controller-state flip-flop:
+
+```text
+D    = ~Q
+Q    = Lack
+Rreq = Lack
+```
+
+`reset` initializes `Q` and `Lack` to `0`. The flip-flop updates on the
+positive edge of `click`, where `click` is generated combinationally as:
+
+```text
+(~Lreq & Lack & Rack) |
+( Lreq & ~Lack & ~Rack)
+```
+
+The stage's data and carry storage are explicit flip-flop banks. Both are
+clocked by the same positive edge of `click`; `click` is not an enable on a
+separate clock. Consequently, `Rdata` and `Rcarry` update together for the
+same token, and no extra carry-register stage is introduced.
 
 `Lcarry` and `Rcarry` carry compiler-planned cross-phase `DATA` and `CONTROL`
 values. They have no independent request/acknowledge handshake and must pass
