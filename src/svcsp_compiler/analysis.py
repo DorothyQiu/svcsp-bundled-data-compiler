@@ -29,7 +29,7 @@ CommunicationNode = ReceiveNode | SendNode
 DefinitionNode = ReceiveNode | AssignNode
 SemanticValueSymbol = VariableSymbol | ParameterSymbol
 _ControlPath = tuple[tuple[PredicateNode, bool], ...]
-_ReachingDefinitions = list[tuple[VariableSymbol, tuple[DefinitionNode, ...]]]
+_ReachingDefinitions = list[tuple[VariableSymbol, tuple[DefinitionNode, ...], bool]]
 
 
 class ValueOrigin(str, Enum):
@@ -52,6 +52,15 @@ class ValueUse:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitReachingValue:
+    """Graph-local definitions and entry reachability for one process-exit value."""
+
+    symbol: VariableSymbol
+    graph_local_definitions: tuple[DefinitionNode, ...]
+    entry_value_may_reach: bool
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisFacts:
     """Read-only facts collected during one USG occurrence-order traversal."""
 
@@ -67,6 +76,7 @@ class AnalysisFacts:
     uses_without_graph_local_producer: tuple[tuple[USGNode, SemanticValueSymbol], ...]
     value_uses: tuple[ValueUse, ...]
     definition_consumers: tuple[tuple[DefinitionNode, tuple[ValueUse, ...]], ...]
+    exit_reaching_values: tuple[ExitReachingValue, ...]
 
     def predecessors_of(self, communication: CommunicationNode) -> tuple[CommunicationNode, ...]:
         """Return the possible preceding communications for ``communication``."""
@@ -130,6 +140,14 @@ class AnalysisFacts:
                 return consumers
         raise KeyError("definition node is not present in these analysis facts")
 
+    def exit_reaching_of(self, symbol: VariableSymbol) -> ExitReachingValue:
+        """Return graph-local and entry-value reachability for ``symbol`` at exit."""
+
+        for value in self.exit_reaching_values:
+            if value.symbol is symbol:
+                return value
+        raise KeyError("variable is not present in these process-exit analysis facts")
+
 
 class USGAnalysisError(ValueError):
     """USG occurrence/control structure cannot be analyzed as structured paths."""
@@ -141,7 +159,7 @@ def analyze_usg(graph: UnifiedSemanticGraph) -> AnalysisFacts:
     nodes = graph.nodes
     paths = _control_paths(nodes, graph.control_edges)
     analyzer = _OccurrenceAnalyzer(nodes, paths)
-    end_index, _, _ = analyzer.visit_region(0, (), (), [])
+    end_index, _, reaching = analyzer.visit_region(0, (), (), [])
     if end_index != len(nodes) or len(analyzer.consumed_ids) != len(nodes):
         raise USGAnalysisError("USG occurrence traversal did not consume every node once")
     return AnalysisFacts(
@@ -155,6 +173,10 @@ def analyze_usg(graph: UnifiedSemanticGraph) -> AnalysisFacts:
         tuple(
             (definition, tuple(consumers))
             for definition, consumers in analyzer.definition_consumers
+        ),
+        tuple(
+            ExitReachingValue(symbol, definitions, entry_value_may_reach)
+            for symbol, definitions, entry_value_may_reach in reaching
         ),
     )
 
@@ -257,7 +279,11 @@ class _OccurrenceAnalyzer:
         if isinstance(node, (AssignNode, PredicateNode, SendNode)):
             self.uses.append((node, uses))
         for symbol in uses:
-            producers = _reaching_definitions(reaching, symbol) if isinstance(symbol, VariableSymbol) else ()
+            if isinstance(symbol, VariableSymbol):
+                _ensure_reaching_variable(reaching, symbol)
+                producers = _reaching_definitions(reaching, symbol)
+            else:
+                producers = ()
             origin = _value_origin(symbol, producers)
             value_use = ValueUse(node, symbol, origin, producers)
             self.value_uses.append(value_use)
@@ -378,32 +404,53 @@ def _value_origin(
 def _reaching_definitions(
     reaching: _ReachingDefinitions, variable: VariableSymbol
 ) -> tuple[DefinitionNode, ...]:
-    for known, definitions in reaching:
+    for known, definitions, _ in reaching:
         if known is variable:
             return definitions
     return ()
 
 
+def _ensure_reaching_variable(
+    reaching: _ReachingDefinitions, variable: VariableSymbol
+) -> None:
+    if any(known is variable for known, _, _ in reaching):
+        return
+    reaching.append((variable, (), True))
+
+
 def _set_reaching_definition(
     reaching: _ReachingDefinitions, variable: VariableSymbol, node: DefinitionNode
 ) -> None:
-    for index, (known, _) in enumerate(reaching):
+    for index, (known, _, _) in enumerate(reaching):
         if known is variable:
-            reaching[index] = (variable, (node,))
+            reaching[index] = (variable, (node,), False)
             return
-    reaching.append((variable, (node,)))
+    reaching.append((variable, (node,), False))
 
 
 def _merge_reaching_definitions(*environments: _ReachingDefinitions) -> _ReachingDefinitions:
-    merged: list[tuple[VariableSymbol, list[DefinitionNode]]] = []
+    merged: list[tuple[VariableSymbol, list[DefinitionNode], bool]] = []
     for environment in environments:
-        for variable, definitions in environment:
-            for known, known_definitions in merged:
+        for variable, definitions, entry_value_may_reach in environment:
+            for index, (known, known_definitions, known_entry_value_may_reach) in enumerate(merged):
                 if known is variable:
                     for definition in definitions:
                         if not any(definition is existing for existing in known_definitions):
                             known_definitions.append(definition)
+                    merged[index] = (
+                        known,
+                        known_definitions,
+                        known_entry_value_may_reach or entry_value_may_reach,
+                    )
                     break
             else:
-                merged.append((variable, list(definitions)))
-    return [(variable, tuple(definitions)) for variable, definitions in merged]
+                merged.append((variable, list(definitions), entry_value_may_reach))
+
+    for index, (variable, definitions, entry_value_may_reach) in enumerate(merged):
+        if any(not any(known is variable for known, _, _ in environment) for environment in environments):
+            entry_value_may_reach = True
+        merged[index] = (variable, definitions, entry_value_may_reach)
+    return [
+        (variable, tuple(definitions), entry_value_may_reach)
+        for variable, definitions, entry_value_may_reach in merged
+    ]

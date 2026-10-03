@@ -4,7 +4,7 @@ import pytest
 from pyslang.ast import CallExpression, GenerateBlockArraySymbol, ParameterSymbol, ProceduralBlockSymbol
 
 from svcsp_compiler.semantic_frontend import parse_text
-from svcsp_compiler.analysis import AnalysisFacts, ValueOrigin, analyze_usg
+from svcsp_compiler.analysis import AnalysisFacts, ExitReachingValue, ValueOrigin, analyze_usg
 from svcsp_compiler.usg import (
     AssignNode,
     ControlEdge,
@@ -488,6 +488,7 @@ endmodule
         "uses_without_graph_local_producer",
         "value_uses",
         "definition_consumers",
+        "exit_reaching_values",
     ]
     assert facts.predecessors_of(first) == ()
     assert facts.predecessors_of(second) == (first,)
@@ -777,6 +778,93 @@ endmodule
     assert facts.incoming_frontier_of(receive_c) == (receive_a,)
     assert facts.incoming_frontier_of(send) == (receive_b, receive_c)
     assert facts.predecessors_of(send) == (receive_b, receive_c)
+
+
+def test_exit_reaching_value_replaces_entry_after_self_assignment() -> None:
+    graph = build_straight_line_usg(_block("""\
+module exit_self_assignment(input logic [7:0] a);
+  logic [7:0] x;
+  always x = x + a;
+endmodule
+"""))
+    (assign,) = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.definitions_of(assign)
+
+    assert facts.exit_reaching_of(x_symbol) == ExitReachingValue(
+        x_symbol, (assign,), False
+    )
+
+
+def test_exit_reaching_value_retains_entry_after_one_branch_assignment() -> None:
+    graph = build_straight_line_usg(_block("""\
+module exit_conditional_entry(input logic p);
+  logic [7:0] x;
+  always begin
+    if (p) x = x + 1;
+  end
+endmodule
+"""))
+    _, assign = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.definitions_of(assign)
+
+    assert facts.exit_reaching_of(x_symbol) == ExitReachingValue(
+        x_symbol, (assign,), True
+    )
+
+
+def test_exit_reaching_value_keeps_only_the_last_straight_line_definition() -> None:
+    graph = build_straight_line_usg(_block("""\
+module exit_last_definition;
+  logic [7:0] x;
+  always begin
+    x = x + 1;
+    x = x + 2;
+  end
+endmodule
+"""))
+    first_assign, second_assign = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.definitions_of(second_assign)
+
+    assert facts.exit_reaching_of(x_symbol) == ExitReachingValue(
+        x_symbol, (second_assign,), False
+    )
+    assert first_assign not in facts.exit_reaching_of(x_symbol).graph_local_definitions
+
+
+def test_exit_reaching_value_merges_both_branch_definitions() -> None:
+    graph = build_straight_line_usg(_block("""\
+module exit_if_else(input logic p);
+  logic [7:0] x;
+  always begin
+    if (p) x = 1;
+    else x = 2;
+  end
+endmodule
+"""))
+    _, true_assign, false_assign = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.definitions_of(true_assign)
+
+    assert facts.exit_reaching_of(x_symbol) == ExitReachingValue(
+        x_symbol, (true_assign, false_assign), False
+    )
+
+
+def test_exit_reaching_value_preserves_never_defined_local_entry() -> None:
+    graph = build_straight_line_usg(_block("""\
+module exit_local_entry;
+  logic [7:0] x, y;
+  always y = x;
+endmodule
+"""))
+    (assign,) = graph.nodes
+    facts = analyze_usg(graph)
+    (x_symbol,) = facts.uses_of(assign)
+
+    assert facts.exit_reaching_of(x_symbol) == ExitReachingValue(x_symbol, (), True)
 
 
 @pytest.mark.parametrize(
