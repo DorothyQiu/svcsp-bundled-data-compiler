@@ -30,6 +30,15 @@ class PersistentStateRequirement:
 
 
 @dataclass(frozen=True, slots=True)
+class StateOutputSurvivalRequirement:
+    """One exit-reaching definition's semantic survival to process exit."""
+
+    symbol: VariableSymbol
+    definition: DefinitionNode
+    boundary_phase: int
+
+
+@dataclass(frozen=True, slots=True)
 class DataSurvivalRequirement:
     """One graph-local definition's semantic survival across one phase boundary."""
 
@@ -57,9 +66,11 @@ class LogicalExecutionPhases:
 
     communication_phases: tuple[tuple[CommunicationNode, int], ...]
     operation_phases: tuple[tuple[CombinationalNode, int], ...]
+    process_exit_phase: int
     data_survival_requirements: tuple[DataSurvivalRequirement, ...]
     control_survival_requirements: tuple[ControlSurvivalRequirement, ...]
     persistent_state_requirements: tuple[PersistentStateRequirement, ...]
+    state_output_survival_requirements: tuple[StateOutputSurvivalRequirement, ...]
 
     def phase_of(self, node: USGNode) -> int:
         """Return the logical execution phase assigned to a placed ``node``."""
@@ -82,8 +93,16 @@ def partition_logical_execution(
     """
 
     communication_phases = _communication_phases(facts)
+    process_exit_phase = max(
+        (phase for _, phase in communication_phases), default=0
+    )
+    exit_reaching_definitions = _local_exit_reaching_definitions(facts)
     operation_phases = _combinational_operation_phases(
-        facts, communication_phases, control_edges
+        facts,
+        communication_phases,
+        control_edges,
+        tuple(definition for _, definition in exit_reaching_definitions),
+        process_exit_phase,
     )
     phases_by_node_id = {
         id(node): phase for node, phase in communication_phases + operation_phases
@@ -93,12 +112,17 @@ def partition_logical_execution(
         control_edges, phases_by_node_id
     )
     persistent_state_requirements = _persistent_state_requirements(facts)
+    state_output_survival_requirements = _state_output_survival_requirements(
+        exit_reaching_definitions, phases_by_node_id, process_exit_phase
+    )
     return LogicalExecutionPhases(
         communication_phases,
         operation_phases,
+        process_exit_phase,
         data_requirements,
         control_requirements,
         persistent_state_requirements,
+        state_output_survival_requirements,
     )
 
 
@@ -134,6 +158,8 @@ def _combinational_operation_phases(
     facts: AnalysisFacts,
     communication_phases: tuple[tuple[CommunicationNode, int], ...],
     control_edges: tuple[ControlEdge, ...],
+    exit_reaching_definitions: tuple[DefinitionNode, ...],
+    process_exit_phase: int,
 ) -> tuple[tuple[CombinationalNode, int], ...]:
     """Propagate placed-consumer requirements backward to Assigns and Predicates."""
 
@@ -149,6 +175,11 @@ def _combinational_operation_phases(
             known is not edge.source for known in operations
         ):
             operations.append(edge.source)
+    exit_reaching_assignments = {
+        id(definition)
+        for definition in exit_reaching_definitions
+        if isinstance(definition, AssignNode)
+    }
 
     changed = True
     while changed:
@@ -157,6 +188,11 @@ def _combinational_operation_phases(
             if not isinstance(definition, AssignNode):
                 continue
             requirement = _earliest_consumer_phase(consumers, phases_by_node_id)
+            if id(definition) in exit_reaching_assignments:
+                requirement = min(
+                    process_exit_phase,
+                    requirement if requirement is not None else process_exit_phase,
+                )
             if requirement is not None and _set_earlier_phase(
                 definition, requirement, phases_by_node_id, operation_phases
             ):
@@ -262,7 +298,7 @@ def _persistent_state_requirements(
         if (
             not isinstance(value_use.symbol, VariableSymbol)
             or not value_use.entry_value_may_reach
-            or isinstance(value_use.symbol.syntax.parent, ImplicitAnsiPortSyntax)
+            or not _is_local_variable(value_use.symbol)
         ):
             continue
         for symbol, uses in entry_dependent_uses:
@@ -281,3 +317,40 @@ def _persistent_state_requirements(
         )
         for symbol, uses in entry_dependent_uses
     )
+
+
+def _local_exit_reaching_definitions(
+    facts: AnalysisFacts,
+) -> tuple[tuple[VariableSymbol, DefinitionNode], ...]:
+    """Return exact local graph definitions that may be consumed at process exit."""
+
+    return tuple(
+        (value.symbol, definition)
+        for value in facts.exit_reaching_values
+        if _is_local_variable(value.symbol)
+        for definition in value.graph_local_definitions
+        if isinstance(definition, (ReceiveNode, AssignNode))
+    )
+
+
+def _state_output_survival_requirements(
+    exit_reaching_definitions: tuple[tuple[VariableSymbol, DefinitionNode], ...],
+    phases_by_node_id: dict[int, int],
+    process_exit_phase: int,
+) -> tuple[StateOutputSurvivalRequirement, ...]:
+    """Derive semantic survival of graph-local definitions consumed at exit."""
+
+    requirements: list[StateOutputSurvivalRequirement] = []
+    for symbol, definition in exit_reaching_definitions:
+        definition_phase = phases_by_node_id.get(id(definition))
+        if definition_phase is None or definition_phase >= process_exit_phase:
+            continue
+        requirements.extend(
+            StateOutputSurvivalRequirement(symbol, definition, boundary_phase)
+            for boundary_phase in range(definition_phase, process_exit_phase)
+        )
+    return tuple(requirements)
+
+
+def _is_local_variable(symbol: VariableSymbol) -> bool:
+    return not isinstance(symbol.syntax.parent, ImplicitAnsiPortSyntax)

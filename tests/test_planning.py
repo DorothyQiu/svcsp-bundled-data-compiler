@@ -1,4 +1,3 @@
-import pytest
 from pyslang.ast import ProceduralBlockSymbol
 
 from svcsp_compiler.analysis import analyze_usg
@@ -6,6 +5,7 @@ from svcsp_compiler.planning import (
     ControlSurvivalRequirement,
     DataSurvivalRequirement,
     PersistentStateRequirement,
+    StateOutputSurvivalRequirement,
     partition_logical_execution,
 )
 from svcsp_compiler.semantic_frontend import parse_text
@@ -212,7 +212,7 @@ endmodule
     assert plan.phase_of(second_assign) == 1
 
 
-def test_unused_assign_remains_unplaced() -> None:
+def test_exit_reaching_assign_is_placed_even_without_an_ordinary_consumer() -> None:
     graph, _, plan = _plan(_CHANNEL + """
 module m(Channel A);
   logic [7:0] a, t;
@@ -221,8 +221,7 @@ endmodule
 """)
     _, assign = graph.nodes
 
-    with pytest.raises(KeyError, match="not placed"):
-        plan.phase_of(assign)
+    assert plan.phase_of(assign) == 0
 
 
 def test_receive_used_by_a_phase_one_assign_requires_data_survival() -> None:
@@ -457,3 +456,102 @@ endmodule
 """)
 
     assert plan.persistent_state_requirements == ()
+
+
+def test_exit_sink_places_an_exit_only_assign_in_phase_zero() -> None:
+    graph, _, plan = _plan(_CHANNEL + """
+module m(Channel B, input logic [7:0] a);
+  logic [7:0] x;
+  always begin B.Send(x); x = a + 1; end
+endmodule
+""")
+    _, assign = graph.nodes
+
+    assert plan.process_exit_phase == 0
+    assert plan.phase_of(assign) == 0
+
+
+def test_exit_sink_places_an_exit_only_assign_in_the_latest_communication_phase() -> None:
+    graph, _, plan = _plan(_CHANNEL + """
+module m(Channel A, B, C);
+  logic [7:0] a, c, x;
+  always begin
+    A.Receive(a); B.Send(a); C.Receive(c); x = c + 1;
+  end
+endmodule
+""")
+    _, _, _, assign = graph.nodes
+
+    assert plan.process_exit_phase == 1
+    assert plan.phase_of(assign) == 1
+
+
+def test_exit_sink_creates_phase_zero_for_a_state_only_process() -> None:
+    graph, _, plan = _plan(_CHANNEL + """
+module m;
+  logic [7:0] x;
+  always x = x + 1;
+endmodule
+""")
+    (assign,) = graph.nodes
+
+    assert plan.process_exit_phase == 0
+    assert plan.phase_of(assign) == 0
+
+
+def test_state_output_survival_preserves_an_earlier_consumer_placement() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B, C, input logic [7:0] a);
+  logic [7:0] x, c;
+  always begin x = a + 1; B.Send(x); C.Receive(c); end
+endmodule
+""")
+    assign, _, _ = graph.nodes
+    (x_symbol,) = facts.definitions_of(assign)
+
+    assert plan.phase_of(assign) == 0
+    assert plan.process_exit_phase == 1
+    assert plan.state_output_survival_requirements == (
+        StateOutputSurvivalRequirement(x_symbol, assign, 0),
+    )
+
+
+def test_conditional_state_update_survives_to_a_later_branch_exit_phase() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B, C, D, E, F, input logic [7:0] a);
+  logic [7:0] x, c, e;
+  always begin
+    if (x[0]) begin
+      x = a + 1;
+      B.Send(x);
+    end
+    else begin
+      C.Receive(c); D.Send(c); E.Receive(e); F.Send(e);
+    end
+  end
+endmodule
+""")
+    _, assign, _, _, _, _, _ = graph.nodes
+    (x_symbol,) = facts.definitions_of(assign)
+
+    assert plan.process_exit_phase == 1
+    assert plan.phase_of(assign) == 0
+    assert StateOutputSurvivalRequirement(x_symbol, assign, 0) in (
+        plan.state_output_survival_requirements
+    )
+
+
+def test_retained_entry_state_has_no_graph_local_data_or_state_output_survival() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B);
+  logic [7:0] x;
+  always B.Send(x);
+endmodule
+""")
+    (send,) = graph.nodes
+    (x_symbol,) = facts.uses_of(send)
+
+    assert plan.data_survival_requirements == ()
+    assert plan.state_output_survival_requirements == ()
+    assert plan.persistent_state_requirements[0].symbol is x_symbol
+    assert plan.persistent_state_requirements[0].entry_value_may_reach_at_exit is True
