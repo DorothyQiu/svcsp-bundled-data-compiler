@@ -5,6 +5,7 @@ from svcsp_compiler.analysis import analyze_usg
 from svcsp_compiler.planning import (
     ControlSurvivalRequirement,
     DataSurvivalRequirement,
+    PersistentStateRequirement,
     partition_logical_execution,
 )
 from svcsp_compiler.semantic_frontend import parse_text
@@ -368,3 +369,91 @@ endmodule
 """)
 
     assert plan.control_survival_requirements == ()
+
+
+def test_persistent_state_records_self_assignment_entry_use_and_exit_definition() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B, input logic [7:0] a);
+  logic [7:0] x;
+  always begin x = x + a; B.Send(x); end
+endmodule
+""")
+    assign, _ = graph.nodes
+    x_symbol, _ = facts.uses_of(assign)
+    old_x_use = facts.value_use_of(assign, x_symbol)
+
+    assert plan.persistent_state_requirements == (
+        PersistentStateRequirement(x_symbol, (old_x_use,), (assign,), False),
+    )
+
+
+def test_persistent_state_keeps_conditional_assignment_and_retained_entry() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B, input logic p);
+  logic [7:0] x;
+  always begin if (p) x = x + 1; B.Send(x); end
+endmodule
+""")
+    _, assign, send = graph.nodes
+    (x_symbol,) = facts.definitions_of(assign)
+    old_x_use = facts.value_use_of(assign, facts.uses_of(assign)[0])
+    sent_x_use = facts.value_use_of(send, facts.uses_of(send)[0])
+
+    assert plan.persistent_state_requirements == (
+        PersistentStateRequirement(
+            x_symbol, (old_x_use, sent_x_use), (assign,), True
+        ),
+    )
+
+
+def test_persistent_state_includes_exit_definition_without_an_in_process_consumer() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B, input logic [7:0] a);
+  logic [7:0] x;
+  always begin B.Send(x); x = a + 1; end
+endmodule
+""")
+    send, assign = graph.nodes
+    (x_symbol,) = facts.uses_of(send)
+    sent_x_use = facts.value_use_of(send, x_symbol)
+
+    assert plan.persistent_state_requirements == (
+        PersistentStateRequirement(x_symbol, (sent_x_use,), (assign,), False),
+    )
+
+
+def test_persistent_state_records_read_only_local_entry() -> None:
+    graph, facts, plan = _plan(_CHANNEL + """
+module m(Channel B);
+  logic [7:0] x;
+  always B.Send(x);
+endmodule
+""")
+    (send,) = graph.nodes
+    (x_symbol,) = facts.uses_of(send)
+    sent_x_use = facts.value_use_of(send, x_symbol)
+
+    assert plan.persistent_state_requirements == (
+        PersistentStateRequirement(x_symbol, (sent_x_use,), (), True),
+    )
+
+
+def test_definition_before_use_without_an_entry_dependent_use_is_not_persistent_state() -> None:
+    _, _, plan = _plan(_CHANNEL + """
+module m(Channel B, input logic [7:0] a);
+  logic [7:0] x;
+  always begin x = a + 1; B.Send(x); end
+endmodule
+""")
+
+    assert plan.persistent_state_requirements == ()
+
+
+def test_port_entry_and_parameter_uses_are_not_persistent_state() -> None:
+    _, _, plan = _plan(_CHANNEL + """
+module m #(parameter logic [7:0] P = 1) (Channel B, input logic [7:0] port_x);
+  always begin B.Send(port_x); B.Send(P); end
+endmodule
+""")
+
+    assert plan.persistent_state_requirements == ()

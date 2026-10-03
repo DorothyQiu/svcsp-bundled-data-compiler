@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pyslang.ast import VariableSymbol
+from pyslang.syntax import ImplicitAnsiPortSyntax
+
 from .analysis import (
     AnalysisFacts,
     CommunicationNode,
@@ -14,6 +17,16 @@ from .usg import AssignNode, ControlEdge, PredicateNode, ReceiveNode, SendNode, 
 
 
 CombinationalNode = AssignNode | PredicateNode
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentStateRequirement:
+    """One local value's semantic process-entry and process-exit state facts."""
+
+    symbol: VariableSymbol
+    entry_dependent_uses: tuple[ValueUse, ...]
+    exit_reaching_definitions: tuple[DefinitionNode, ...]
+    entry_value_may_reach_at_exit: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +59,7 @@ class LogicalExecutionPhases:
     operation_phases: tuple[tuple[CombinationalNode, int], ...]
     data_survival_requirements: tuple[DataSurvivalRequirement, ...]
     control_survival_requirements: tuple[ControlSurvivalRequirement, ...]
+    persistent_state_requirements: tuple[PersistentStateRequirement, ...]
 
     def phase_of(self, node: USGNode) -> int:
         """Return the logical execution phase assigned to a placed ``node``."""
@@ -78,11 +92,13 @@ def partition_logical_execution(
     control_requirements = _control_survival_requirements(
         control_edges, phases_by_node_id
     )
+    persistent_state_requirements = _persistent_state_requirements(facts)
     return LogicalExecutionPhases(
         communication_phases,
         operation_phases,
         data_requirements,
         control_requirements,
+        persistent_state_requirements,
     )
 
 
@@ -234,3 +250,34 @@ def _control_survival_requirements(
             for boundary_phase in range(predicate_phase, controlled_phase)
         )
     return tuple(requirements)
+
+
+def _persistent_state_requirements(
+    facts: AnalysisFacts,
+) -> tuple[PersistentStateRequirement, ...]:
+    """Derive semantic persistent-state candidates from existing analysis facts."""
+
+    entry_dependent_uses: list[tuple[VariableSymbol, list[ValueUse]]] = []
+    for value_use in facts.value_uses:
+        if (
+            not isinstance(value_use.symbol, VariableSymbol)
+            or not value_use.entry_value_may_reach
+            or isinstance(value_use.symbol.syntax.parent, ImplicitAnsiPortSyntax)
+        ):
+            continue
+        for symbol, uses in entry_dependent_uses:
+            if symbol is value_use.symbol:
+                uses.append(value_use)
+                break
+        else:
+            entry_dependent_uses.append((value_use.symbol, [value_use]))
+
+    return tuple(
+        PersistentStateRequirement(
+            symbol,
+            tuple(uses),
+            facts.exit_reaching_of(symbol).graph_local_definitions,
+            facts.exit_reaching_of(symbol).entry_value_may_reach,
+        )
+        for symbol, uses in entry_dependent_uses
+    )
