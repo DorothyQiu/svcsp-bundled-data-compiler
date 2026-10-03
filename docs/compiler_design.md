@@ -547,7 +547,108 @@ from P0 because it is produced in P1. In Example 2, `t` is produced in P0 for
 survival requirement from P0 to P1. The planner carries `t`, not `a`, because
 the placed producer of the later consumer is the definition of `t`.
 
-### 11.4 Realization Planning
+### 11.4 Persistent State Requirements
+
+Persistent State Requirements are semantic facts for later state planning. A
+`PersistentStateRequirement` contains:
+
+```text
+the exact native variable symbol
+placed uses at which the process-entry LOCAL value may reach
+graph-local Receive / Assign definitions that may reach process exit
+whether the entry value may remain reaching at process exit
+```
+
+Process exit acts as a semantic state-update sink. Therefore, an
+exit-reaching definition may be required even when it has no ordinary
+in-process consumer. Port-entry and parameter values are excluded from
+persistent-state requirements.
+
+These requirements are semantic only. They do not choose FFs, muxes,
+registers, or a pipeline-versus-state realization, and they do not create
+state, Phi, or Merge nodes in the USG.
+
+Examples:
+
+```systemverilog
+x = x + a;
+B.Send(x);
+```
+
+The old LOCAL `x` is a state input, and `Assign(x)` is a next-state
+definition.
+
+```systemverilog
+if (p) x = x + 1;
+B.Send(x);
+```
+
+`Assign(x)` or the retained old `x` may become the next state.
+
+```systemverilog
+B.Send(x);
+x = a + 1;
+```
+
+`Assign(x)` is still required because it defines next state, even though it
+has no ordinary in-process consumer.
+
+```systemverilog
+B.Send(x);
+```
+
+This is a read-only persistent value whose old state is retained unchanged.
+
+### 11.5 Process-Exit State-Update Sink
+
+Process exit is an implicit semantic sink used only for planning
+persistent-state updates. Next-state computation placement is distinct from
+state commit or update: an exit-reaching definition is consumed by the
+process-exit sink, but the sink does not select a concrete state-commit
+implementation.
+
+The process-exit sink phase is the latest logical phase that may reach exit,
+using the same conservative max-at-join policy used for shared operations
+after a control-flow join. A process with no communication still has logical
+phase 0, so state-only and combinational-only processes can be planned.
+
+Exit-reaching Assign computations use the same consumer-driven combinational
+placement policy: process exit is their consumer. Same-phase placement does
+not change reaching-value semantics. In particular, an earlier Send may still
+consume an entry or old value while a later source assignment computes the
+next-state value for process exit.
+
+State commit itself is not yet a concrete FF, register, or mux decision.
+
+Examples:
+
+```systemverilog
+B.Send(x);
+x = a + 1;
+```
+
+`B.Send(x)` consumes old `x`; `Assign(x)` computes next `x` in P0; the exit
+sink consumes `Assign(x)` in P0.
+
+```systemverilog
+A.Receive(a);
+B.Send(a);
+C.Receive(c);
+x = c + 1;
+```
+
+The exit sink is in P1, and `Assign(x)` is placed in P1.
+
+State-only example:
+
+```systemverilog
+x = x + 1;
+```
+
+Logical P0 exists and contains the next-state computation feeding the exit
+sink.
+
+### 11.6 Realization Planning
 
 Realization Planning selects how a sequence of logical phases is realized.
 The phases may be realized spatially as multiple physical pipeline stages, or
@@ -565,7 +666,7 @@ x = x + a;
 uses the earlier stored value of `x` and plans the later value as explicit
 state. It is not rejected solely because it is a feedback recurrence.
 
-### 11.5 Physical State Across Realized Boundaries
+### 11.7 Physical State Across Realized Boundaries
 
 If Realization Planning places a required value on opposite sides of a physical
 pipeline-stage boundary, it must arrange for the value to survive across that
