@@ -5,14 +5,14 @@ module stage_storage #(
     input  wire             click,
     output wire [WIDTH-1:0] Q
 );
-    genvar bit_index;
+    genvar i;
 
     generate
-        for (bit_index = 0; bit_index < WIDTH; bit_index = bit_index + 1) begin : g_bit
-            click_dff storage_bit (
-                .D(D[bit_index]),
+        for (i = 0; i < WIDTH; i = i + 1) begin : g_bit
+            click_dff ff (
+                .D(D[i]),
                 .click(click),
-                .Q(Q[bit_index])
+                .Q(Q[i])
             );
         end
     endgenerate

@@ -44,6 +44,8 @@ RTL-library interface or generated RTL.
   another clock. Basic Click stages have no global or local clock input.
 - By default, only Click-controller state is reset. Basic Click state resets
   to `0` using the active-low asynchronous `reset_n` input.
+- `Lreq` and `Rack` must remain at four-phase idle `0` while reset is asserted
+  and during reset release. Reset must not be added as gating to `click`.
 - Stage data and carry storage have no reset.
 - Persistent-state reset is source- and architecture-dependent.
 - Compiler-generated combinational datapath may be synthesis-optimized.

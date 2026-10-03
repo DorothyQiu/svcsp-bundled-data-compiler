@@ -6,22 +6,20 @@ module basic_click_ctrl (
     output wire Rreq,
     output wire click
 );
-    wire D;
     wire not_Lreq;
     wire not_Lack;
     wire not_Rack;
     wire click_term_0;
     wire click_term_1;
 
-    click_dff_reset_n state_ff (
-        .D(D),
+    click_dff_reset_n click_ff (
+        .D(not_Lack),
         .click(click),
         .reset_n(reset_n),
         .Q(Lack)
     );
 
-    not invert_feedback (D, Lack);
-    buf drive_Rreq (Rreq, Lack);
+    assign Rreq = Lack;
 
     not invert_Lreq (not_Lreq, Lreq);
     not invert_Lack (not_Lack, Lack);

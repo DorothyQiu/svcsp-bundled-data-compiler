@@ -2,16 +2,12 @@ module click_dff_reset_n (
     input  wire D,
     input  wire click,
     input  wire reset_n,
-    output wire Q
+    output logic Q
 );
-    reg q;
-
-    always @(posedge click or negedge reset_n) begin
+    always_ff @(posedge click or negedge reset_n) begin
         if (!reset_n)
-            q <= 1'b0;
+            Q <= 1'b0;
         else
-            q <= D;
+            Q <= D;
     end
-
-    assign Q = q;
 endmodule
